@@ -89,17 +89,28 @@ class AutomationAborted(RuntimeError):
     pass
 
 
-def launch_edge_browser(playwright: Any, headless: bool):
+def launch_browser(playwright: Any, headless: bool, status_callback: StatusCallback | None = None):
+    def emit(message: str) -> None:
+        if status_callback:
+            status_callback(message)
+
     try:
+        emit("Microsoft Edge를 실행합니다.")
         return playwright.chromium.launch(channel="msedge", headless=headless)
-    except PlaywrightError as exc:
-        raise RuntimeError(
-            "Microsoft Edge를 Playwright로 실행하지 못했습니다.\n"
-            "- Windows VM에 Microsoft Edge가 설치되어 있는지 확인해주세요.\n"
-            "- 사내 Edge 정책이 자동화 실행 또는 새 브라우저 프로필 생성을 차단할 수 있습니다.\n"
-            "- Edge가 실행되지만 다운로드가 실패하면 보안/DLP 정책의 다운로드 차단 여부를 확인해주세요.\n"
-            f"원본 오류: {exc}"
-        ) from exc
+    except PlaywrightError as edge_exc:
+        emit("Microsoft Edge 실행에 실패해 Playwright 기본 Chromium으로 다시 시도합니다.")
+        try:
+            return playwright.chromium.launch(headless=headless)
+        except PlaywrightError as chromium_exc:
+            raise RuntimeError(
+                "브라우저를 Playwright로 실행하지 못했습니다.\n"
+                "- Windows VM에서는 Microsoft Edge가 설치되어 있는지 확인해주세요.\n"
+                "- macOS 등 로컬 테스트 환경에서는 Playwright Chromium이 설치되어 있는지 확인해주세요.\n"
+                "- 사내 브라우저 정책이 자동화 실행 또는 새 브라우저 프로필 생성을 차단할 수 있습니다.\n"
+                "- 브라우저가 실행되지만 다운로드가 실패하면 보안/DLP 정책의 다운로드 차단 여부를 확인해주세요.\n"
+                f"Edge 원본 오류: {edge_exc}\n"
+                f"Chromium 원본 오류: {chromium_exc}"
+            ) from chromium_exc
 
 
 def write_startup_error(log_dir: str | Path, message: str) -> Path:
@@ -737,9 +748,8 @@ def run_automation(
         return {"total": 0, "success": 0, "failed": 0}
 
     with sync_playwright() as playwright:
-        emit_status("Microsoft Edge를 실행합니다.")
         try:
-            browser = launch_edge_browser(playwright, headless)
+            browser = launch_browser(playwright, headless, emit_status)
         except RuntimeError as exc:
             error_path = write_startup_error(log_dir, str(exc))
             emit_status(f"브라우저 시작 오류를 기록했습니다: {error_path}")

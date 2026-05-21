@@ -4,7 +4,7 @@
 
 - 대상 사이트: https://kotra.or.kr/mutugpt/export-assistant/report
 - 실행 방식: Windows VM에서 ZIP 다운로드 후 `.bat` 파일 실행
-- 브라우저: VM에 설치된 Microsoft Edge 사용
+- 브라우저: VM에 설치된 Microsoft Edge 우선 사용
 - 배포 방식: PyInstaller exe 없이 Python 런타임을 폴더 내부에 자동 준비
 
 본 프로그램은 내부 업무 효율화를 위한 보조 도구이며, KOTRA의 공식 대외 서비스가 아닙니다.
@@ -114,6 +114,8 @@ run_cli.bat
 
 설치가 끝나면 `VM setup passed.` 메시지가 표시됩니다.
 
+프로그램 실행 시에는 Microsoft Edge를 먼저 실행합니다. Edge 실행에 실패하면 macOS 등 로컬 테스트 편의를 위해 Playwright 기본 Chromium으로 한 번 더 시도합니다.
+
 ## 주요 파일
 
 | 파일 | 용도 |
@@ -205,6 +207,8 @@ run_cli.bat --create-template
 
 - VM에 Microsoft Edge가 설치되어 있는지 확인하세요.
 - Edge 실행이 보안 정책으로 차단되어 있는지 확인하세요.
+
+macOS 등 로컬 테스트 환경에서는 Edge가 없어도 Playwright Chromium이 설치되어 있으면 fallback으로 실행될 수 있습니다.
 
 ### Edge는 열리지만 자동화가 실패함
 
