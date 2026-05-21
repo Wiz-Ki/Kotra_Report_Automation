@@ -982,7 +982,8 @@ def read_input_excel(input_excel_path: str | Path) -> list[dict[str, Any]]:
                 raw_value = find_category_value(record)
             row[key] = normalize_field_value(key, raw_value)
 
-        row["row_index"] = idx
+        row_index_value = normalize_row_index(get_source_value(record, "row_index"), idx)
+        row["row_index"] = row_index_value
         row["excel_row_number"] = idx + 1
         row["process_status"] = ""
         row["saved_file"] = ""
@@ -990,6 +991,15 @@ def read_input_excel(input_excel_path: str | Path) -> list[dict[str, Any]]:
         rows.append(row)
 
     return rows
+
+
+def normalize_row_index(value: Any, fallback_index: int) -> int:
+    text = str(value or "").strip()
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    if re.fullmatch(r"\d+", text):
+        return int(text)
+    return fallback_index
 
 
 def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:

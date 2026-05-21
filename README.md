@@ -40,6 +40,15 @@ run_gui.bat
 run_cli.bat
 ```
 
+### 📊 액셀 파일 업로드시 참고사항
+
+> [!CAUTION]
+> **중요:** 아래 양식에 맞게 액셀 파일을 수정하여 반출 후 프로그램에 입력해주세요!!   
+> **선택항목은 행 자체는 유지하고, 값을 비워주세요!**
+<img width="2284" height="354" alt="input_template_example" src="https://github.com/user-attachments/assets/a99390ac-a77b-46f5-a0e2-a1403e178a56" />
+
+
+
 ## 실행 조건
 
 - Windows 원격 VM에서 실행합니다.

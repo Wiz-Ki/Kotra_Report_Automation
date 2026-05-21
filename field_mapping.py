@@ -68,6 +68,16 @@ FIELD_MAPPING = {
 
 
 SOURCE_COLUMN_ALIASES = {
+    "row_index": [
+        "row_index",
+        "연번",
+        "연번(선택)",
+        "순번",
+        "번호",
+        "NO",
+        "No",
+        "no",
+    ],
     "hs_code": ["hs_code", "HS CODE", "HSCODE"],
     "product_name": ["product_name", "수출품명", "품목명"],
     "export_scale": [
