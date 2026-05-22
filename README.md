@@ -250,7 +250,6 @@ KOTRA_Report_Auto_Release/
  ├─ automation.py
  ├─ gui_launcher.py
  ├─ gui_v2.py
- ├─ gui.py
  ├─ config.py
  ├─ field_mapping.py
  ├─ logger.py

@@ -440,6 +440,7 @@ class KotraReportAppV2(ctk.CTk):
         self.log_text.grid(row=0, column=0, sticky="nsew", padx=18, pady=(18, 10))
         self.log_text.configure(state="disabled")
         self._configure_log_tags()
+        self._bind_log_mousewheel()
 
         log_actions = ctk.CTkFrame(panel, fg_color="transparent")
         log_actions.grid(row=1, column=0, sticky="e", padx=18, pady=(0, 18))
@@ -523,6 +524,40 @@ class KotraReportAppV2(ctk.CTk):
         self.log_text.tag_config("danger", foreground="#fca5a5")
         self.log_text.tag_config("warning", foreground="#fcd34d")
         self.log_text.tag_config("info", foreground="#bfdbfe")
+
+    def _bind_log_mousewheel(self) -> None:
+        if self.log_text is None:
+            return
+
+        widgets = [self.log_text]
+        for attr in ("_textbox", "_canvas", "_y_scrollbar"):
+            widget = getattr(self.log_text, attr, None)
+            if widget is not None:
+                widgets.append(widget)
+
+        for widget in widgets:
+            widget.bind("<MouseWheel>", self._on_log_mousewheel, add="+")
+            widget.bind("<Button-4>", self._on_log_mousewheel, add="+")
+            widget.bind("<Button-5>", self._on_log_mousewheel, add="+")
+
+    def _on_log_mousewheel(self, event: tk.Event) -> str:
+        if self.log_text is None:
+            return "break"
+
+        if getattr(event, "num", None) == 4:
+            step = -3
+        elif getattr(event, "num", None) == 5:
+            step = 3
+        elif event.delta == 0:
+            return "break"
+        elif sys.platform == "darwin":
+            step = -event.delta
+        else:
+            step = -int(event.delta / 120) * 3
+
+        if step != 0:
+            self.log_text.yview_scroll(step, "units")
+        return "break"
 
     def _choose_input(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])

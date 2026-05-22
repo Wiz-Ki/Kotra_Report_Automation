@@ -34,7 +34,6 @@ def resolve_default_input() -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="KOTRA 수출 보고서 자동 생성 및 다운로드 프로그램")
     parser.add_argument("--gui", action="store_true", help="CustomTkinter GUI V2로 실행합니다.")
-    parser.add_argument("--gui-legacy", action="store_true", help="기존 tkinter GUI로 실행합니다.")
     parser.add_argument("--input", default=str(resolve_default_input()), help="입력 엑셀 파일 경로")
     parser.add_argument("--download-dir", default=str(DEFAULT_DOWNLOAD_DIR), help="다운로드 저장 폴더")
     parser.add_argument("--log-dir", default=str(DEFAULT_LOG_DIR), help="로그 저장 폴더")
@@ -61,12 +60,6 @@ def main() -> None:
 
     if args.gui:
         from gui_v2 import run_gui
-
-        run_gui()
-        return
-
-    if args.gui_legacy:
-        from gui import run_gui
 
         run_gui()
         return
