@@ -116,10 +116,12 @@ class HoverTooltip:
                 self.tooltip.wm_attributes("-transparentcolor", transparent_color)
             except tk.TclError:
                 self.tooltip.configure(bg=COLORS["text"])
+        font_family = self._font_family()
+        font_size = 12 if sys.platform.startswith("win") else 11
         measure_font = tkfont.nametofont("TkDefaultFont").copy()
-        measure_font.configure(size=10)
-        label_font = ctk.CTkFont(size=10)
-        padx = 10
+        measure_font.configure(family=font_family, size=font_size)
+        label_font = ctk.CTkFont(family=font_family, size=font_size)
+        padx = 12
         screen_width = self.widget.winfo_screenwidth()
         screen_height = self.widget.winfo_screenheight()
         max_label_width = max(180, min(self.max_width, screen_width - 40 - (padx * 2)))
@@ -143,7 +145,7 @@ class HoverTooltip:
             wraplength=wraplength,
             font=label_font,
         )
-        label.pack(padx=padx, pady=7)
+        label.pack(padx=padx, pady=8)
 
         self.tooltip.update_idletasks()
         x = self.widget.winfo_rootx() + 12
@@ -176,6 +178,13 @@ class HoverTooltip:
             self.tooltip = None
         if HoverTooltip.active is self:
             HoverTooltip.active = None
+
+    def _font_family(self) -> str:
+        if sys.platform.startswith("win"):
+            return "Malgun Gothic"
+        if sys.platform == "darwin":
+            return "Apple SD Gothic Neo"
+        return "TkDefaultFont"
 
     def _pointer_inside_widget(self) -> bool:
         x, y = self.widget.winfo_pointerxy()
