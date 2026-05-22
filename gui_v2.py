@@ -5,6 +5,7 @@ import os
 import subprocess
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,139 @@ COLORS = {
     "danger_hover": "#b91c1c",
     "warning": "#b45309",
 }
+
+
+class HoverTooltip:
+    active: HoverTooltip | None = None
+    scheduled: HoverTooltip | None = None
+
+    def __init__(self, widget: tk.Widget, text: str, delay_ms: int = 700, max_width: int = 720) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.max_width = max_width
+        self.after_id: str | None = None
+        self.tooltip: tk.Toplevel | None = None
+
+        self._bind_widget(widget)
+        for attr in ("_canvas", "_text_label", "_image_label", "_switch", "_button", "_label"):
+            child = getattr(widget, attr, None)
+            if child is not None:
+                self._bind_widget(child)
+
+    def _bind_widget(self, widget: tk.Widget) -> None:
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<FocusIn>", self._schedule, add="+")
+        widget.bind("<FocusOut>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event: tk.Event | None = None) -> None:
+        if HoverTooltip.scheduled is not None and HoverTooltip.scheduled is not self:
+            HoverTooltip.scheduled._cancel()
+        if HoverTooltip.active is not None and HoverTooltip.active is not self:
+            HoverTooltip.active._hide_now()
+        self._cancel()
+        HoverTooltip.scheduled = self
+        self.after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _cancel(self) -> None:
+        if self.after_id is not None:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+        if HoverTooltip.scheduled is self:
+            HoverTooltip.scheduled = None
+
+    def _show(self) -> None:
+        self.after_id = None
+        if HoverTooltip.scheduled is self:
+            HoverTooltip.scheduled = None
+        if self.tooltip is not None or not self.text:
+            return
+
+        if HoverTooltip.active is not None and HoverTooltip.active is not self:
+            HoverTooltip.active._hide_now()
+
+        root = self.widget.winfo_toplevel()
+        if not root.winfo_viewable():
+            return
+
+        self.tooltip = tk.Toplevel(self.widget)
+        self.tooltip.withdraw()
+        self.tooltip.overrideredirect(True)
+        transparent_color = "#010203"
+        self.tooltip.configure(bg=transparent_color)
+        try:
+            self.tooltip.wm_attributes("-transparentcolor", transparent_color)
+        except tk.TclError:
+            self.tooltip.configure(bg=COLORS["text"])
+        measure_font = tkfont.nametofont("TkDefaultFont").copy()
+        measure_font.configure(size=10)
+        label_font = ctk.CTkFont(size=10)
+        padx = 10
+        screen_width = self.widget.winfo_screenwidth()
+        screen_height = self.widget.winfo_screenheight()
+        max_label_width = max(180, min(self.max_width, screen_width - 40 - (padx * 2)))
+        text_width = measure_font.measure(self.text)
+        wraplength = min(max_label_width, max(1, text_width))
+
+        body = ctk.CTkFrame(
+            self.tooltip,
+            fg_color=COLORS["text"],
+            corner_radius=8,
+            border_width=0,
+        )
+        body.pack()
+        label = ctk.CTkLabel(
+            body,
+            text=self.text,
+            justify="left",
+            text_color="#ffffff",
+            fg_color="transparent",
+            wraplength=wraplength,
+            font=label_font,
+        )
+        label.pack(padx=padx, pady=7)
+
+        self.tooltip.update_idletasks()
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        width = self.tooltip.winfo_reqwidth()
+        height = self.tooltip.winfo_reqheight()
+
+        if x + width > screen_width - 8:
+            x = max(8, screen_width - width - 8)
+        if y + height > screen_height - 8:
+            y = max(8, self.widget.winfo_rooty() - height - 8)
+
+        self.tooltip.geometry(f"+{x}+{y}")
+        self.tooltip.deiconify()
+        self.tooltip.lift()
+        HoverTooltip.active = self
+
+    def _hide(self, _event: tk.Event | None = None) -> None:
+        if _event is not None and self._pointer_inside_widget():
+            return
+        self._cancel()
+        self._hide_now()
+
+    def _hide_now(self) -> None:
+        if self.tooltip is not None:
+            try:
+                self.tooltip.destroy()
+            except (tk.TclError, AttributeError):
+                pass
+            self.tooltip = None
+        if HoverTooltip.active is self:
+            HoverTooltip.active = None
+
+    def _pointer_inside_widget(self) -> bool:
+        x, y = self.widget.winfo_pointerxy()
+        left = self.widget.winfo_rootx()
+        top = self.widget.winfo_rooty()
+        right = left + self.widget.winfo_width()
+        bottom = top + self.widget.winfo_height()
+        return left <= x <= right and top <= y <= bottom
 
 
 class KotraReportAppV2(ctk.CTk):
@@ -88,6 +222,7 @@ class KotraReportAppV2(ctk.CTk):
         self.parallel_options_frame: ctk.CTkFrame | None = None
         self.parallel_sessions_menu: ctk.CTkOptionMenu | None = None
         self.mode_buttons: dict[str, ctk.CTkButton] = {}
+        self.tooltips: list[HoverTooltip] = []
 
         self.stop_requested = False
         self.force_stop_requested = False
@@ -99,6 +234,9 @@ class KotraReportAppV2(ctk.CTk):
 
         self._build_ui()
         self.after(200, self._poll_events)
+
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        self.tooltips.append(HoverTooltip(widget, text))
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -143,7 +281,7 @@ class KotraReportAppV2(ctk.CTk):
         )
         self.status_badge.pack(side="left", padx=(0, 8))
 
-        ctk.CTkButton(
+        about_button = ctk.CTkButton(
             right,
             text="ⓘ",
             width=36,
@@ -155,7 +293,9 @@ class KotraReportAppV2(ctk.CTk):
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=17, weight="bold"),
             command=self._show_about,
-        ).pack(side="left")
+        )
+        about_button.pack(side="left")
+        self._attach_tooltip(about_button, "프로그램 버전, 제작 정보, 문의 정보를 확인합니다.")
 
         subtitle = ctk.CTkLabel(
             header,
@@ -181,7 +321,7 @@ class KotraReportAppV2(ctk.CTk):
         ctk.CTkEntry(panel, textvariable=self.input_path, height=38, border_color=COLORS["border"]).grid(
             row=0, column=1, sticky="ew", pady=(18, 8)
         )
-        ctk.CTkButton(
+        input_button = ctk.CTkButton(
             panel,
             text="찾기",
             width=92,
@@ -192,13 +332,15 @@ class KotraReportAppV2(ctk.CTk):
             border_color=COLORS["border"],
             text_color=COLORS["text"],
             command=self._choose_input,
-        ).grid(row=0, column=2, sticky="e", padx=18, pady=(18, 8))
+        )
+        input_button.grid(row=0, column=2, sticky="e", padx=18, pady=(18, 8))
+        self._attach_tooltip(input_button, "자동 생성에 사용할 입력 엑셀 파일을 선택합니다.")
 
         self._field_label(panel, "저장 폴더").grid(row=1, column=0, sticky="w", padx=18, pady=(8, 18))
         ctk.CTkEntry(panel, textvariable=self.download_dir, height=38, border_color=COLORS["border"]).grid(
             row=1, column=1, sticky="ew", pady=(8, 18)
         )
-        ctk.CTkButton(
+        download_button = ctk.CTkButton(
             panel,
             text="찾기",
             width=92,
@@ -209,7 +351,9 @@ class KotraReportAppV2(ctk.CTk):
             border_color=COLORS["border"],
             text_color=COLORS["text"],
             command=self._choose_download_dir,
-        ).grid(row=1, column=2, sticky="e", padx=18, pady=(8, 18))
+        )
+        download_button.grid(row=1, column=2, sticky="e", padx=18, pady=(8, 18))
+        self._attach_tooltip(download_button, "완성된 PDF 보고서를 저장할 폴더를 선택합니다.")
 
     def _build_options_panel(self, parent: ctk.CTkFrame) -> None:
         panel = self._section(parent, 2, "실행 옵션")
@@ -243,6 +387,7 @@ class KotraReportAppV2(ctk.CTk):
             font=ctk.CTkFont(size=14),
         )
         self.background_switch.grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
+        self._attach_tooltip(self.background_switch, "브라우저 창을 띄우지 않고 백그라운드에서 실행합니다.")
         self.use_session_switch = ctk.CTkSwitch(
             switch_box,
             text="브라우저 세션 저장 사용",
@@ -255,6 +400,7 @@ class KotraReportAppV2(ctk.CTk):
             font=ctk.CTkFont(size=14),
         )
         self.use_session_switch.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        self._attach_tooltip(self.use_session_switch, "저장된 로그인 세션을 사용하고, 실행 후 세션을 다시 저장합니다.")
         self.auto_retry_switch = ctk.CTkSwitch(
             switch_box,
             text="실패 항목 자동 재시도(1회)",
@@ -268,6 +414,7 @@ class KotraReportAppV2(ctk.CTk):
             font=ctk.CTkFont(size=14),
         )
         self.auto_retry_switch.grid(row=2, column=0, sticky="w", padx=16, pady=(0, 14))
+        self._attach_tooltip(self.auto_retry_switch, "실패한 항목을 자동으로 한 번 더 시도합니다. 실행 중 변경하면 이후 실패부터 반영됩니다.")
 
         self._build_parallel_options(panel)
 
@@ -312,6 +459,7 @@ class KotraReportAppV2(ctk.CTk):
             dropdown_fg_color=COLORS["surface"],
         )
         self.parallel_sessions_menu.grid(row=0, column=1, sticky="e", padx=(12, 6), pady=14)
+        self._attach_tooltip(self.parallel_sessions_menu, "개발자 옵션입니다. 동시에 실행할 브라우저 세션 수를 선택합니다.")
 
         ctk.CTkLabel(
             frame,
@@ -343,6 +491,7 @@ class KotraReportAppV2(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
         )
         self.start_button.pack(side="left")
+        self._attach_tooltip(self.start_button, "선택한 입력 파일과 옵션으로 보고서 자동 생성을 시작합니다.")
 
         self.stop_button = ctk.CTkButton(
             left,
@@ -359,6 +508,7 @@ class KotraReportAppV2(ctk.CTk):
             state="disabled",
         )
         self.stop_button.pack(side="left", padx=(8, 0))
+        self._attach_tooltip(self.stop_button, "현재 처리 중인 행을 마친 뒤 다음 행으로 넘어가지 않고 멈춥니다.")
 
         self.force_stop_button = ctk.CTkButton(
             left,
@@ -375,8 +525,9 @@ class KotraReportAppV2(ctk.CTk):
             state="disabled",
         )
         self.force_stop_button.pack(side="left", padx=(8, 0))
+        self._attach_tooltip(self.force_stop_button, "현재 작업을 가능한 즉시 중단합니다. 진행 중인 행은 실패로 남을 수 있습니다.")
 
-        ctk.CTkButton(
+        template_button = ctk.CTkButton(
             panel,
             text="+ 예시 템플릿 생성",
             width=148,
@@ -387,12 +538,14 @@ class KotraReportAppV2(ctk.CTk):
             border_color=COLORS["border"],
             text_color=COLORS["text"],
             command=self._create_template,
-        ).grid(row=0, column=1, sticky="e")
+        )
+        template_button.grid(row=0, column=1, sticky="e")
+        self._attach_tooltip(template_button, "입력 형식을 확인할 수 있는 예시 엑셀 템플릿을 생성합니다.")
 
         folders = ctk.CTkFrame(panel, fg_color="transparent")
         folders.grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
-        ctk.CTkButton(
+        open_download_button = ctk.CTkButton(
             folders,
             text="↗ 다운로드 폴더 열기",
             width=148,
@@ -403,7 +556,9 @@ class KotraReportAppV2(ctk.CTk):
             border_color=COLORS["border"],
             text_color=COLORS["text"],
             command=self._open_download_dir,
-        ).pack(side="left")
+        )
+        open_download_button.pack(side="left")
+        self._attach_tooltip(open_download_button, "PDF 보고서가 저장되는 다운로드 폴더를 엽니다.")
 
     def _build_progress_panel(self, parent: ctk.CTkFrame) -> None:
         panel = self._section(parent, 4, "진행 현황")
@@ -465,7 +620,7 @@ class KotraReportAppV2(ctk.CTk):
 
         log_actions = ctk.CTkFrame(panel, fg_color="transparent")
         log_actions.grid(row=1, column=0, sticky="e", padx=18, pady=(0, 18))
-        ctk.CTkButton(
+        open_log_button = ctk.CTkButton(
             log_actions,
             text="↗ 로그 폴더 열기",
             width=128,
@@ -476,7 +631,9 @@ class KotraReportAppV2(ctk.CTk):
             border_color=COLORS["border"],
             text_color=COLORS["text"],
             command=self._open_log_dir,
-        ).pack(side="right")
+        )
+        open_log_button.pack(side="right")
+        self._attach_tooltip(open_log_button, "실행 기록, 실패 목록, 처리 상태 파일이 저장된 로그 폴더를 엽니다.")
 
     def _section(self, parent: ctk.CTkFrame, row: int, title: str) -> ctk.CTkFrame:
         wrapper = ctk.CTkFrame(parent, fg_color=COLORS["surface"], border_width=1, border_color=COLORS["border"], corner_radius=8)
@@ -514,6 +671,10 @@ class KotraReportAppV2(ctk.CTk):
             )
             button.grid(row=0, column=column, sticky="ew", padx=(4 if column == 0 else 2, 4), pady=4)
             self.mode_buttons[value] = button
+            if value == "전체 실행":
+                self._attach_tooltip(button, "입력 엑셀의 전체 행을 처음부터 처리합니다.")
+            else:
+                self._attach_tooltip(button, "logs/failed_rows.xlsx에 기록된 실패 행만 다시 처리합니다.")
         self._refresh_run_mode_buttons()
         return selector
 
