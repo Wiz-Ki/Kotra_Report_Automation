@@ -19,6 +19,7 @@ from config import (
     DEFAULT_DOWNLOAD_DIR,
     DEFAULT_LOG_DIR,
     DEFAULT_PARALLEL_SESSIONS,
+    DEFAULT_ROW_RETRY_COUNT,
     DEFAULT_STATE_PATH,
     MAX_PARALLEL_SESSIONS,
 )
@@ -65,6 +66,7 @@ class KotraReportAppV2(ctk.CTk):
         self.run_mode = tk.StringVar(value="전체 실행")
         self.background = tk.BooleanVar(value=False)
         self.use_session = tk.BooleanVar(value=False)
+        self.auto_retry = tk.BooleanVar(value=True)
         self.parallel_sessions = tk.StringVar(value=str(DEFAULT_PARALLEL_SESSIONS))
         self.status = tk.StringVar(value="대기 중")
         self.progress = tk.StringVar(value="0 / 0")
@@ -246,13 +248,24 @@ class KotraReportAppV2(ctk.CTk):
             button_hover_color="#f8fafc",
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=14),
-        ).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 14))
+        ).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        ctk.CTkSwitch(
+            switch_box,
+            text="실패 항목 자동 재시도(1회)",
+            variable=self.auto_retry,
+            fg_color="#cbd5e1",
+            progress_color=COLORS["primary"],
+            button_color="#ffffff",
+            button_hover_color="#f8fafc",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14),
+        ).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 14))
 
         self._build_parallel_options(panel)
 
         hint = ctk.CTkLabel(
             panel,
-            text="실패 행 재시도는 logs/failed_rows.xlsx 기준입니다. 세션 저장은 로그인이나 쿠키 유지가 필요할 때만 사용하세요.",
+            text="처리 중 실패한 항목은 재시도 대기열에 올려 기본 1회 다시 시도합니다. 실패 행 재시도는 logs/failed_rows.xlsx 기준입니다.",
             font=ctk.CTkFont(size=13),
             text_color=COLORS["muted"],
             anchor="w",
@@ -841,6 +854,7 @@ class KotraReportAppV2(ctk.CTk):
                 retry_failed_only=self._retry_failed_only(),
                 wait_for_manual_login=False,
                 parallel_sessions=self._selected_parallel_sessions(),
+                row_retry_count=DEFAULT_ROW_RETRY_COUNT if self.auto_retry.get() else 0,
                 status_callback=lambda message: self.events.put(("status", message)),
                 progress_callback=lambda data: self.events.put(("progress", data)),
                 stop_requested=lambda: self.stop_requested,

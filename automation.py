@@ -21,6 +21,7 @@ from config import (
     DEFAULT_DOWNLOAD_DIR,
     DEFAULT_HEADLESS,
     DEFAULT_LOG_DIR,
+    DEFAULT_ROW_RETRY_COUNT,
     DEFAULT_STATE_PATH,
     ELEMENT_TIMEOUT_MS,
     GENERATION_RETRY_COUNT,
@@ -79,6 +80,7 @@ PROCESSING_STATUS_COLUMNS = [
 ]
 STATUS_PENDING = "처리 안됨"
 STATUS_RUNNING = "처리 중"
+STATUS_RETRY_PENDING = "자동 재시도 대기"
 STATUS_SUCCESS = "처리완료"
 STATUS_FAILED = "처리실패"
 PARALLEL_WAIT_SUMMARY_INTERVAL_SECONDS = 30
@@ -724,6 +726,42 @@ def normalize_parallel_sessions(parallel_sessions: int) -> int:
     return max(1, min(MAX_PARALLEL_SESSIONS, count))
 
 
+def normalize_row_retry_count(row_retry_count: int) -> int:
+    try:
+        count = int(row_retry_count)
+    except (TypeError, ValueError):
+        return DEFAULT_ROW_RETRY_COUNT
+    return max(0, count)
+
+
+def build_failure_error_message(
+    page: Page,
+    row_data: dict[str, Any],
+    log_dir: str | Path,
+    diagnostic_events: list[str],
+    exc: Exception,
+    *,
+    suffix: str = "",
+) -> tuple[str, str]:
+    if isinstance(exc, PlaywrightTimeoutError):
+        message = f"제한 시간 안에 필요한 요소를 찾지 못했습니다: {exc}"
+        artifacts = save_failure_artifacts(page, row_data, log_dir, message, diagnostic_events, suffix=suffix)
+        return message, f"{message} / diagnostics: {artifacts}"
+
+    if isinstance(exc, GenerationError):
+        error_message = f"{exc} / diagnostics: {exc.artifacts}" if exc.artifacts else str(exc)
+        return str(exc), error_message
+
+    message = str(exc)
+    artifacts = save_failure_artifacts(page, row_data, log_dir, message, diagnostic_events, suffix=suffix)
+    return message, f"{message} / diagnostics: {artifacts}"
+
+
+def retry_suffix(attempt: int, final: bool = False) -> str:
+    label = "final" if final else "retry"
+    return f"{label}_attempt_{attempt + 1}"
+
+
 def prepare_parallel_storage_state(
     state_path: Path,
     headless: bool,
@@ -769,6 +807,7 @@ def run_parallel_automation(
     retry_failed_only: bool,
     wait_for_manual_login: bool,
     parallel_sessions: int,
+    row_retry_count: int,
     status_callback: StatusCallback | None,
     progress_callback: ProgressCallback | None,
     stop_requested: StopFlag | None,
@@ -776,9 +815,10 @@ def run_parallel_automation(
 ) -> dict[str, int]:
     total = len(rows)
     worker_count = min(normalize_parallel_sessions(parallel_sessions), total)
-    row_queue: queue.Queue[tuple[int, dict[str, Any]]] = queue.Queue()
+    row_retry_count = normalize_row_retry_count(row_retry_count)
+    row_queue: queue.Queue[tuple[int, dict[str, Any], int]] = queue.Queue()
     for row_number, row_data in enumerate(rows, start=1):
-        row_queue.put((row_number, row_data))
+        row_queue.put((row_number, row_data, 0))
 
     counter_lock = threading.Lock()
     file_lock = threading.Lock()
@@ -912,7 +952,7 @@ def run_parallel_automation(
                         break
 
                     try:
-                        current_index, row_data = row_queue.get_nowait()
+                        current_index, row_data, row_attempt = row_queue.get_nowait()
                     except queue.Empty:
                         break
 
@@ -920,7 +960,10 @@ def run_parallel_automation(
                     row_label = f"{current_index}/{total}"
                     if retry_failed_only:
                         row_label = f"{row_label}, 원본 행 {row_index}"
+                    if row_attempt:
+                        row_label = f"{row_label}, 자동 재시도 {row_attempt}/{row_retry_count}"
                     prefix = f"[세션 {session_id}] [{row_label}]"
+                    should_requeue = False
 
                     try:
                         emit_progress(f"{prefix} 입력 및 보고서 생성 중")
@@ -952,44 +995,41 @@ def run_parallel_automation(
                         clear_wait_status(session_id)
                         emit_status(f"{prefix} 성공: {saved_file.name}")
 
-                    except PlaywrightTimeoutError as exc:
-                        clear_wait_status(session_id)
-                        message = f"제한 시간 안에 필요한 요소를 찾지 못했습니다: {exc}"
-                        artifacts = save_failure_artifacts(page, row_data, log_dir, message, diagnostic_events)
-                        error_message = f"{message} / diagnostics: {artifacts}"
-                        with file_lock:
-                            log_failed_row(row_data, error_message, log_dir)
-                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
-                        mark_result(False)
-                        emit_status(f"{prefix} 실패: {message}")
-
                     except AutomationAborted:
                         emit_status(f"[세션 {session_id}] 강제종료 요청으로 작업을 즉시 중단합니다.")
                         break
 
-                    except GenerationError as exc:
-                        clear_wait_status(session_id)
-                        error_message = f"{exc} / diagnostics: {exc.artifacts}"
-                        with file_lock:
-                            log_failed_row(row_data, error_message, log_dir)
-                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
-                        mark_result(False)
-                        emit_status(f"{prefix} 실패: {exc}")
-
                     except Exception as exc:
                         clear_wait_status(session_id)
-                        artifacts = save_failure_artifacts(page, row_data, log_dir, str(exc), diagnostic_events)
-                        error_message = f"{exc} / diagnostics: {artifacts}"
-                        with file_lock:
-                            log_failed_row(row_data, error_message, log_dir)
-                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
-                        mark_result(False)
-                        emit_status(f"{prefix} 실패: {exc}")
+                        can_retry = row_attempt < row_retry_count and not should_stop_before_next_row()
+                        message, error_message = build_failure_error_message(
+                            page,
+                            row_data,
+                            log_dir,
+                            diagnostic_events,
+                            exc,
+                            suffix=retry_suffix(row_attempt, final=not can_retry),
+                        )
+                        if can_retry:
+                            should_requeue = True
+                            next_attempt = row_attempt + 1
+                            with file_lock:
+                                update_processing_status(input_excel_path, log_dir, row_data, STATUS_RETRY_PENDING, error_message=error_message)
+                            row_queue.put((current_index, row_data, next_attempt))
+                            emit_status(f"{prefix} 실패: {message}")
+                            emit_status(f"{prefix} 자동 재시도 대기열에 다시 추가했습니다 ({next_attempt}/{row_retry_count}).")
+                            emit_progress(f"{prefix} 자동 재시도 대기 중")
+                        else:
+                            with file_lock:
+                                log_failed_row(row_data, error_message, log_dir)
+                                update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                            mark_result(False)
+                            emit_status(f"{prefix} 최종 실패: {message}")
 
                     finally:
                         row_queue.task_done()
                         emit_progress(f"{prefix} 다음 행 준비 중")
-                        if not should_stop_before_next_row() and not row_queue.empty():
+                        if should_requeue or (not should_stop_before_next_row() and not row_queue.empty()):
                             try:
                                 reset_for_next_row(page)
                             except Exception as exc:
@@ -1042,6 +1082,7 @@ def run_automation(
     stop_requested: StopFlag | None = None,
     force_stop_requested: StopFlag | None = None,
     parallel_sessions: int = 1,
+    row_retry_count: int = DEFAULT_ROW_RETRY_COUNT,
 ) -> dict[str, int]:
     input_excel_path = Path(input_excel_path)
     download_dir = Path(download_dir)
@@ -1053,8 +1094,10 @@ def run_automation(
 
     rows = read_failed_rows(log_dir) if retry_failed_only else read_input_excel(input_excel_path)
     total = len(rows)
+    row_retry_count = normalize_row_retry_count(row_retry_count)
     success_count = 0
     failed_count = 0
+    completed_count = 0
     last_progress_index = 0
 
     def emit_status(message: str) -> None:
@@ -1104,6 +1147,7 @@ def run_automation(
             retry_failed_only=retry_failed_only,
             wait_for_manual_login=wait_for_manual_login,
             parallel_sessions=parallel_sessions,
+            row_retry_count=row_retry_count,
             status_callback=status_callback,
             progress_callback=progress_callback,
             stop_requested=stop_requested,
@@ -1142,17 +1186,31 @@ def run_automation(
                     context.storage_state(path=str(state_path))
                     emit_status(f"로그인 세션을 저장했습니다: {state_path}")
 
-            for current_index, row_data in enumerate(rows, start=1):
+            row_queue: queue.Queue[tuple[int, dict[str, Any], int]] = queue.Queue()
+            for row_number, row_data in enumerate(rows, start=1):
+                row_queue.put((row_number, row_data, 0))
+
+            while True:
                 check_force_stop(force_stop_requested)
-                row_index = int(row_data["row_index"])
                 if stop_requested and stop_requested():
                     emit_status("중지 요청이 있어 다음 행으로 넘어가지 않습니다.")
                     break
 
-                emit_progress(current_index, "입력 및 보고서 생성 중")
+                try:
+                    current_index, row_data, row_attempt = row_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+                row_index = int(row_data["row_index"])
+
                 row_label = f"{current_index}/{total}"
                 if retry_failed_only:
                     row_label = f"{row_label}, 원본 행 {row_index}"
+                if row_attempt:
+                    row_label = f"{row_label}, 자동 재시도 {row_attempt}/{row_retry_count}"
+
+                should_requeue = False
+                emit_progress(completed_count, "입력 및 보고서 생성 중")
                 emit_status(f"[{row_label}] 행 처리를 시작합니다.")
                 clear_diagnostics(diagnostic_events)
                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
@@ -1166,56 +1224,65 @@ def run_automation(
                         diagnostic_events,
                         timeout_ms,
                         retry_count,
-                        status_callback=lambda message, current=current_index: emit_progress(current, message),
+                        status_callback=lambda message: emit_progress(completed_count, message),
                         force_stop_requested=force_stop_requested,
                     )
                     log_success_row(row_data, saved_file, log_dir)
                     success_count += 1
+                    completed_count += 1
                     update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_file)
                     emit_status(f"[{row_label}] 성공: {saved_file.name}")
-
-                except PlaywrightTimeoutError as exc:
-                    failed_count += 1
-                    message = f"제한 시간 안에 필요한 요소를 찾지 못했습니다: {exc}"
-                    artifacts = save_failure_artifacts(page, row_data, log_dir, message, diagnostic_events)
-                    error_message = f"{message} / diagnostics: {artifacts}"
-                    log_failed_row(row_data, error_message, log_dir)
-                    update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
-                    emit_status(f"[{row_label}] 실패: {message}")
 
                 except AutomationAborted:
                     emit_status("강제종료 요청으로 작업을 즉시 중단합니다.")
                     break
 
-                except GenerationError as exc:
-                    failed_count += 1
-                    error_message = f"{exc} / diagnostics: {exc.artifacts}"
-                    log_failed_row(row_data, error_message, log_dir)
-                    update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
-                    emit_status(f"[{row_label}] 실패: {exc}")
-
                 except Exception as exc:
-                    failed_count += 1
-                    artifacts = save_failure_artifacts(page, row_data, log_dir, str(exc), diagnostic_events)
-                    error_message = f"{exc} / diagnostics: {artifacts}"
-                    log_failed_row(row_data, error_message, log_dir)
-                    update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
-                    emit_status(f"[{row_label}] 실패: {exc}")
-
-                finally:
-                    last_progress_index = current_index
-                    emit_progress(current_index, "다음 행 준비 중")
-                    if (
-                        current_index != total
+                    can_retry = (
+                        row_attempt < row_retry_count
                         and not (stop_requested and stop_requested())
                         and not (force_stop_requested and force_stop_requested())
-                    ):
-                        try:
-                            reset_for_next_row(page)
-                        except Exception as exc:
-                            emit_status(f"다음 행 준비 중 페이지 초기화 실패, 새로 접속합니다: {exc}")
-                            open_site(page)
-                            ensure_initial_form(page, emit_status)
+                    )
+                    message, error_message = build_failure_error_message(
+                        page,
+                        row_data,
+                        log_dir,
+                        diagnostic_events,
+                        exc,
+                        suffix=retry_suffix(row_attempt, final=not can_retry),
+                    )
+
+                    if can_retry:
+                        should_requeue = True
+                        next_attempt = row_attempt + 1
+                        update_processing_status(input_excel_path, log_dir, row_data, STATUS_RETRY_PENDING, error_message=error_message)
+                        row_queue.put((current_index, row_data, next_attempt))
+                        emit_status(f"[{row_label}] 실패: {message}")
+                        emit_status(f"[{row_label}] 자동 재시도 대기열에 다시 추가했습니다 ({next_attempt}/{row_retry_count}).")
+                        emit_progress(completed_count, "자동 재시도 대기 중")
+                    else:
+                        failed_count += 1
+                        completed_count += 1
+                        log_failed_row(row_data, error_message, log_dir)
+                        update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                        emit_status(f"[{row_label}] 최종 실패: {message}")
+
+                finally:
+                    row_queue.task_done()
+
+                last_progress_index = completed_count
+                emit_progress(completed_count, "다음 행 준비 중")
+                if (
+                    (should_requeue or not row_queue.empty())
+                    and not (stop_requested and stop_requested())
+                    and not (force_stop_requested and force_stop_requested())
+                ):
+                    try:
+                        reset_for_next_row(page)
+                    except Exception as exc:
+                        emit_status(f"다음 행 준비 중 페이지 초기화 실패, 새로 접속합니다: {exc}")
+                        open_site(page)
+                        ensure_initial_form(page, emit_status)
 
             emit_progress(last_progress_index, "완료")
 

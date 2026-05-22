@@ -22,6 +22,7 @@ TIMEOUT_MS = TIMEOUT_MINUTES * 60 * 1000
 PAGE_LOAD_TIMEOUT_MS = 120 * 1000
 ELEMENT_TIMEOUT_MS = 60 * 1000
 GENERATION_RETRY_COUNT = 2
+DEFAULT_ROW_RETRY_COUNT = 1
 DEFAULT_PARALLEL_SESSIONS = 3
 MAX_PARALLEL_SESSIONS = 5
 
@@ -37,6 +38,7 @@ DEFAULT_CONFIG = {
     "log_dir": str(DEFAULT_LOG_DIR),
     "state_path": str(DEFAULT_STATE_PATH),
     "retry_count": GENERATION_RETRY_COUNT,
+    "row_retry_count": DEFAULT_ROW_RETRY_COUNT,
     "use_storage_state": False,
     "save_storage_state": False,
     "default_parallel_sessions": DEFAULT_PARALLEL_SESSIONS,

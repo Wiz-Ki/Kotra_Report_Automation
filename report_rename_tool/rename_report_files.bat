@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-cd /d "%~dp0"
+cd /d "%~dp0\.."
 
 set "RUNTIME_FILE=%CD%\.runtime_python.bat"
 set "PYTHON_EXE=%CD%\portable_python\python.exe"
@@ -14,11 +14,12 @@ if not exist "%PYTHON_EXE%" (
     exit /b 1
 )
 
-"%PYTHON_EXE%" "%CD%\main.py" %*
+"%PYTHON_EXE%" "%CD%\report_rename_tool\rename_reports_to_original_names.py" %*
 if errorlevel 1 (
-    echo.
+    echo Report file rename failed.
     pause
     exit /b 1
 )
 
+pause
 endlocal
