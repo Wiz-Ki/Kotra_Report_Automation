@@ -548,7 +548,10 @@ def download_report(
     force_stop_requested: StopFlag | None = None,
 ) -> Path:
     save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
+    if save_path.exists() and save_path.is_dir():
+        save_path.mkdir(parents=True, exist_ok=True)
+    else:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
 
     status, download_button = wait_for_download_or_generation_error(page, timeout_ms, status_callback, force_stop_requested)
     if status == "error":
@@ -564,10 +567,34 @@ def download_report(
         download_button.click()
 
     download = download_info.value
-    download.save_as(str(save_path))
+    final_save_path = resolve_download_save_path(download, save_path)
+    download.save_as(str(final_save_path))
     if status_callback:
         status_callback("PDF 다운로드가 완료되었습니다.")
-    return save_path
+    return final_save_path
+
+
+def resolve_download_save_path(download: Any, save_path: Path) -> Path:
+    if not (save_path.exists() and save_path.is_dir()):
+        return save_path
+
+    suggested_filename = str(getattr(download, "suggested_filename", "") or "").strip() or "report.pdf"
+    return unique_file_path(save_path / suggested_filename)
+
+
+def unique_file_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    counter = 1
+    while True:
+        candidate = parent / f"{stem} ({counter}){suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
 
 
 def reset_for_next_row(page: Page) -> None:
@@ -902,11 +929,10 @@ def run_parallel_automation(
                         with file_lock:
                             update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
 
-                        save_path = build_download_path(download_dir, row_data)
                         saved_file = process_row(
                             page,
                             row_data,
-                            save_path,
+                            download_dir,
                             log_dir,
                             diagnostic_events,
                             timeout_ms,
@@ -1131,13 +1157,11 @@ def run_automation(
                 clear_diagnostics(diagnostic_events)
                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
 
-                save_path = build_download_path(download_dir, row_data)
-
                 try:
                     saved_file = process_row(
                         page,
                         row_data,
-                        save_path,
+                        download_dir,
                         log_dir,
                         diagnostic_events,
                         timeout_ms,
@@ -1531,16 +1555,6 @@ def normalize_target_country(value: str) -> str:
     value = re.sub(r"\s*,\s*", ", ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip(" ,")
-
-
-def build_download_path(download_dir: str | Path, row_data: dict[str, Any]) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    row_index = int(row_data.get("row_index", 0))
-    hs_code = safe_filename(row_data.get("hs_code", ""))
-    product_name = safe_filename(row_data.get("product_name", ""))
-    target_country = safe_filename(str(row_data.get("target_country", "")).replace(",", ""))
-    filename = f"{row_index:03d}_{hs_code}_{product_name}_{target_country}_{timestamp}.pdf"
-    return Path(download_dir) / filename
 
 
 def safe_filename(text: Any) -> str:
