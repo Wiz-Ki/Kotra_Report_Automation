@@ -857,6 +857,8 @@ def run_parallel_automation(
     success_count = 0
     failed_count = 0
     completed_count = 0
+    completed_row_numbers: set[int] = set()
+    retry_pending_failed_numbers: set[int] = set()
     last_wait_summary_at = 0.0
 
     def emit_status(message: str) -> None:
@@ -879,14 +881,27 @@ def run_parallel_automation(
                 }
             )
 
-    def mark_result(success: bool) -> None:
+    def mark_result(current_index: int, success: bool) -> None:
         nonlocal success_count, failed_count, completed_count
         with counter_lock:
+            was_retry_pending_failure = current_index in retry_pending_failed_numbers
+            if was_retry_pending_failure:
+                retry_pending_failed_numbers.remove(current_index)
             if success:
+                if was_retry_pending_failure:
+                    failed_count = max(0, failed_count - 1)
                 success_count += 1
-            else:
+            elif not was_retry_pending_failure:
                 failed_count += 1
             completed_count += 1
+            completed_row_numbers.add(current_index)
+
+    def mark_retry_pending_failure(current_index: int) -> None:
+        nonlocal failed_count
+        with counter_lock:
+            if current_index not in retry_pending_failed_numbers:
+                retry_pending_failed_numbers.add(current_index)
+                failed_count += 1
 
     def clear_wait_status(session_id: int) -> None:
         with wait_status_lock:
@@ -979,6 +994,8 @@ def run_parallel_automation(
                     wait_seconds=PARALLEL_INITIAL_FORM_WAIT_SECONDS,
                 )
 
+                next_retry_item: tuple[int, dict[str, Any], int] | None = None
+
                 while True:
                     if combined_force_stop_requested():
                         emit_status(f"[세션 {session_id}] 강제종료 요청으로 작업을 즉시 중단합니다.")
@@ -987,10 +1004,16 @@ def run_parallel_automation(
                         emit_status(f"[세션 {session_id}] 중지 요청이 있어 다음 행으로 넘어가지 않습니다.")
                         break
 
-                    try:
-                        current_index, row_data, row_attempt = row_queue.get_nowait()
-                    except queue.Empty:
-                        break
+                    from_queue = False
+                    if next_retry_item is not None:
+                        current_index, row_data, row_attempt = next_retry_item
+                        next_retry_item = None
+                    else:
+                        try:
+                            current_index, row_data, row_attempt = row_queue.get_nowait()
+                            from_queue = True
+                        except queue.Empty:
+                            break
 
                     row_index = int(row_data["row_index"])
                     row_label = f"{current_index}/{total}"
@@ -1027,7 +1050,7 @@ def run_parallel_automation(
                         with file_lock:
                             log_success_row(row_data, saved_file, log_dir)
                             update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_file)
-                        mark_result(True)
+                        mark_result(current_index, True)
                         clear_wait_status(session_id)
                         emit_status(f"{prefix} 성공: {saved_file.name}")
 
@@ -1055,21 +1078,23 @@ def run_parallel_automation(
                             next_attempt = row_attempt + 1
                             with file_lock:
                                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_RETRY_PENDING, error_message=error_message)
-                            row_queue.put((current_index, row_data, next_attempt))
+                            next_retry_item = (current_index, row_data, next_attempt)
+                            mark_retry_pending_failure(current_index)
                             emit_status(f"{prefix} 실패: {message}")
-                            emit_status(f"{prefix} 자동 재시도 대기열에 다시 추가했습니다 ({next_attempt}/{row_retry_count}).")
-                            emit_progress(f"{prefix} 자동 재시도 대기 중")
+                            emit_status(f"{prefix} 바로 자동 재시도합니다 ({next_attempt}/{row_retry_count}).")
+                            emit_progress(f"{prefix} 자동 재시도 중")
                         else:
                             with file_lock:
                                 log_failed_row(row_data, error_message, log_dir)
                                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
-                            mark_result(False)
+                            mark_result(current_index, False)
                             emit_status(f"{prefix} 최종 실패: {message}")
 
                     finally:
-                        row_queue.task_done()
+                        if from_queue:
+                            row_queue.task_done()
                         emit_progress(f"{prefix} 다음 행 준비 중")
-                        if should_requeue or (not should_stop_before_next_row() and not row_queue.empty()):
+                        if should_requeue or next_retry_item is not None or (not should_stop_before_next_row() and not row_queue.empty()):
                             try:
                                 reset_for_next_row(page)
                             except Exception as exc:
@@ -1097,6 +1122,27 @@ def run_parallel_automation(
             except Exception as exc:
                 worker_errors.append(str(exc))
                 emit_status(f"병렬 세션 오류: {exc}")
+
+    intentionally_stopped = should_stop_before_next_row()
+    with counter_lock:
+        uncompleted_numbers = [
+            row_number
+            for row_number in range(1, total + 1)
+            if row_number not in completed_row_numbers
+        ]
+
+    if uncompleted_numbers and not intentionally_stopped:
+        error_message = (
+            "병렬 세션이 중단되어 이 행은 처리되지 않았습니다. "
+            "실패 행만 재시도로 다시 실행해주세요."
+        )
+        with file_lock:
+            for row_number in uncompleted_numbers:
+                row_data = rows[row_number - 1]
+                log_failed_row(row_data, error_message, log_dir)
+                update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                mark_result(row_number, False)
+        emit_status(f"병렬 세션 중단으로 미처리 {len(uncompleted_numbers)}건을 실패로 기록했습니다.")
 
     emit_progress("완료")
     with counter_lock:
@@ -1144,6 +1190,7 @@ def run_automation(
     failed_count = 0
     completed_count = 0
     last_progress_index = 0
+    retry_pending_failed_numbers: set[int] = set()
 
     def emit_status(message: str) -> None:
         if status_callback:
@@ -1162,6 +1209,21 @@ def run_automation(
                     "status": status,
                 }
             )
+
+    def mark_retry_pending_failure(current_index: int) -> None:
+        nonlocal failed_count
+        if current_index not in retry_pending_failed_numbers:
+            retry_pending_failed_numbers.add(current_index)
+            failed_count += 1
+
+    def resolve_retry_pending_failure(current_index: int, success: bool) -> bool:
+        nonlocal failed_count
+        if current_index not in retry_pending_failed_numbers:
+            return False
+        retry_pending_failed_numbers.remove(current_index)
+        if success:
+            failed_count = max(0, failed_count - 1)
+        return True
 
     if retry_failed_only and total == 0:
         emit_status("재시도할 실패 행이 없습니다.")
@@ -1236,16 +1298,24 @@ def run_automation(
             for row_number, row_data in enumerate(rows, start=1):
                 row_queue.put((row_number, row_data, 0))
 
+            next_retry_item: tuple[int, dict[str, Any], int] | None = None
+
             while True:
                 check_force_stop(force_stop_requested)
                 if stop_requested and stop_requested():
                     emit_status("중지 요청이 있어 다음 행으로 넘어가지 않습니다.")
                     break
 
-                try:
-                    current_index, row_data, row_attempt = row_queue.get_nowait()
-                except queue.Empty:
-                    break
+                from_queue = False
+                if next_retry_item is not None:
+                    current_index, row_data, row_attempt = next_retry_item
+                    next_retry_item = None
+                else:
+                    try:
+                        current_index, row_data, row_attempt = row_queue.get_nowait()
+                        from_queue = True
+                    except queue.Empty:
+                        break
 
                 row_index = int(row_data["row_index"])
 
@@ -1274,6 +1344,7 @@ def run_automation(
                         force_stop_requested=force_stop_requested,
                     )
                     log_success_row(row_data, saved_file, log_dir)
+                    resolve_retry_pending_failure(current_index, success=True)
                     success_count += 1
                     completed_count += 1
                     update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_file)
@@ -1303,24 +1374,28 @@ def run_automation(
                         should_requeue = True
                         next_attempt = row_attempt + 1
                         update_processing_status(input_excel_path, log_dir, row_data, STATUS_RETRY_PENDING, error_message=error_message)
-                        row_queue.put((current_index, row_data, next_attempt))
+                        next_retry_item = (current_index, row_data, next_attempt)
+                        mark_retry_pending_failure(current_index)
                         emit_status(f"[{row_label}] 실패: {message}")
-                        emit_status(f"[{row_label}] 자동 재시도 대기열에 다시 추가했습니다 ({next_attempt}/{row_retry_count}).")
-                        emit_progress(completed_count, "자동 재시도 대기 중")
+                        emit_status(f"[{row_label}] 바로 자동 재시도합니다 ({next_attempt}/{row_retry_count}).")
+                        emit_progress(completed_count, "자동 재시도 중")
                     else:
-                        failed_count += 1
+                        was_retry_pending_failure = resolve_retry_pending_failure(current_index, success=False)
+                        if not was_retry_pending_failure:
+                            failed_count += 1
                         completed_count += 1
                         log_failed_row(row_data, error_message, log_dir)
                         update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
                         emit_status(f"[{row_label}] 최종 실패: {message}")
 
                 finally:
-                    row_queue.task_done()
+                    if from_queue:
+                        row_queue.task_done()
 
                 last_progress_index = completed_count
                 emit_progress(completed_count, "다음 행 준비 중")
                 if (
-                    (should_requeue or not row_queue.empty())
+                    (should_requeue or next_retry_item is not None or not row_queue.empty())
                     and not (stop_requested and stop_requested())
                     and not (force_stop_requested and force_stop_requested())
                 ):
@@ -1349,6 +1424,16 @@ def row_identity(row_data: dict[str, Any]) -> tuple[str, str, str, str]:
         str(row_data.get("hs_code", "")).strip(),
         str(row_data.get("product_name", "")).strip(),
         str(row_data.get("target_country", "")).strip(),
+    )
+
+
+def log_record_identity(record: dict[str, Any], fallback_key: str = "") -> tuple[str, str, str, str]:
+    row_index = str(record.get("row_index", "")).strip() or fallback_key
+    return (
+        row_index,
+        str(record.get("hs_code", "")).strip(),
+        str(record.get("product_name", "")).strip(),
+        str(record.get("target_country", "")).strip(),
     )
 
 
@@ -1497,21 +1582,21 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
     df = pd.read_excel(path, dtype=str, keep_default_na=False)
     records = df.to_dict(orient="records")
     rows: list[dict[str, Any]] = []
-    seen_row_indexes: set[str] = set()
+    seen_rows: set[tuple[str, str, str, str]] = set()
 
     for fallback_index, record in reversed(list(enumerate(records, start=1))):
         row_index_text = str(record.get("row_index", "")).strip()
-        dedupe_key = row_index_text or f"fallback-{fallback_index}"
-        if dedupe_key in seen_row_indexes:
+        dedupe_key = log_record_identity(record, f"fallback-{fallback_index}")
+        if dedupe_key in seen_rows:
             continue
 
         failed_at = str(record.get("failed_at", "")).strip()
         success_at = latest_success_at.get(dedupe_key, "")
         if success_at and (not failed_at or success_at >= failed_at):
-            seen_row_indexes.add(dedupe_key)
+            seen_rows.add(dedupe_key)
             continue
 
-        seen_row_indexes.add(dedupe_key)
+        seen_rows.add(dedupe_key)
 
         row = {}
         for key in FIELD_MAPPING.keys():
@@ -1524,20 +1609,20 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
     return list(reversed(rows))
 
 
-def read_latest_success_times(log_dir: Path) -> dict[str, str]:
+def read_latest_success_times(log_dir: Path) -> dict[tuple[str, str, str, str], str]:
     path = log_dir / "success_log.xlsx"
     if not path.exists():
         return {}
 
     df = pd.read_excel(path, dtype=str, keep_default_na=False)
-    latest: dict[str, str] = {}
-    for record in df.to_dict(orient="records"):
-        row_index = str(record.get("row_index", "")).strip()
+    latest: dict[tuple[str, str, str, str], str] = {}
+    for fallback_index, record in enumerate(df.to_dict(orient="records"), start=1):
+        key = log_record_identity(record, f"fallback-{fallback_index}")
         completed_at = str(record.get("completed_at", "")).strip()
-        if not row_index or not completed_at:
+        if not key[0] or not completed_at:
             continue
-        if completed_at > latest.get(row_index, ""):
-            latest[row_index] = completed_at
+        if completed_at > latest.get(key, ""):
+            latest[key] = completed_at
     return latest
 
 
