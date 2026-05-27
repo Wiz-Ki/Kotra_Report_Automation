@@ -337,7 +337,7 @@ class KotraReportAppV2(ctk.CTk):
         )
         input_button = ctk.CTkButton(
             panel,
-            text="📄 엑셀 선택",
+            text="엑셀 선택",
             width=118,
             height=38,
             fg_color=COLORS["surface_alt"],
@@ -356,7 +356,7 @@ class KotraReportAppV2(ctk.CTk):
         )
         download_button = ctk.CTkButton(
             panel,
-            text="📁 폴더 선택",
+            text="폴더 선택",
             width=118,
             height=38,
             fg_color=COLORS["surface_alt"],
@@ -543,7 +543,7 @@ class KotraReportAppV2(ctk.CTk):
 
         template_button = ctk.CTkButton(
             panel,
-            text="📄 입력 양식 만들기",
+            text="입력 양식 만들기",
             width=170,
             height=42,
             fg_color=COLORS["surface"],
@@ -561,7 +561,7 @@ class KotraReportAppV2(ctk.CTk):
 
         open_download_button = ctk.CTkButton(
             folders,
-            text="📂 결과 폴더 열기",
+            text="결과 폴더 열기",
             width=154,
             height=36,
             fg_color=COLORS["surface"],
@@ -636,7 +636,7 @@ class KotraReportAppV2(ctk.CTk):
         log_actions.grid(row=1, column=0, sticky="e", padx=18, pady=(0, 18))
         open_log_button = ctk.CTkButton(
             log_actions,
-            text="📋 실행 기록 열기",
+            text="실행 기록 열기",
             width=144,
             height=36,
             fg_color=COLORS["surface"],
