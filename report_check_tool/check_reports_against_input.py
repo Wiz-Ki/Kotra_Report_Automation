@@ -11,6 +11,7 @@ import pandas as pd
 
 OUTPUT_FILENAME = "report_check_result.xlsx"
 REPORT_SUFFIX = "수출시장분석보고서"
+EXCEL_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
 
 SOURCE_COLUMN_ALIASES = {
     "row_index": ["row_index", "연번", "연번(선택)", "순번", "번호", "NO", "No", "no"],
@@ -120,13 +121,23 @@ def check_reports_against_input(
 def find_input_excel(folder: Path) -> Path:
     candidates = [
         path
-        for path in sorted(folder.glob("*.xlsx"))
+        for path in sorted(folder.iterdir())
+        if path.is_file()
+        and path.suffix.lower() in EXCEL_EXTENSIONS
         if not path.name.startswith("~$")
         and path.name != OUTPUT_FILENAME
         and "report_check_result" not in path.stem
     ]
     if not candidates:
-        raise FileNotFoundError(f"폴더 안에서 입력 엑셀 파일을 찾지 못했습니다: {folder}")
+        files = [path.name for path in sorted(folder.iterdir()) if path.is_file()]
+        file_list = "\n".join(f"- {name}" for name in files[:50]) or "(파일 없음)"
+        raise FileNotFoundError(
+            "폴더 안에서 입력 엑셀 파일을 찾지 못했습니다.\n"
+            f"검사한 폴더: {folder}\n"
+            "지원 확장자: .xlsx, .xls, .xlsm\n"
+            "폴더 안 파일:\n"
+            f"{file_list}"
+        )
     if len(candidates) > 1:
         names = "\n".join(f"- {path.name}" for path in candidates)
         raise RuntimeError(
@@ -137,7 +148,15 @@ def find_input_excel(folder: Path) -> Path:
 
 
 def read_input_rows(input_path: Path) -> list[dict[str, str]]:
-    df = pd.read_excel(input_path, dtype=str, keep_default_na=False)
+    try:
+        df = pd.read_excel(input_path, dtype=str, keep_default_na=False)
+    except ImportError as exc:
+        if input_path.suffix.lower() == ".xls":
+            raise RuntimeError(
+                ".xls 파일을 읽으려면 추가 패키지가 필요합니다. "
+                "엑셀에서 .xlsx로 다시 저장한 뒤 실행해주세요."
+            ) from exc
+        raise
     rows: list[dict[str, str]] = []
 
     for fallback_index, record in enumerate(df.to_dict(orient="records"), start=1):
