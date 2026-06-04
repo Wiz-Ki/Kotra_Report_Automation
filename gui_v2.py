@@ -350,7 +350,7 @@ class KotraReportAppV2(ctk.CTk):
         input_button.grid(row=0, column=2, sticky="e", padx=18, pady=(18, 8))
         self._attach_tooltip(input_button, "보고서 자동생성에 사용할 엑셀 파일을 선택합니다.")
 
-        self._field_label(panel, "저장 폴더").grid(row=1, column=0, sticky="w", padx=18, pady=(8, 18))
+        self._field_label(panel, "다운로드 위치").grid(row=1, column=0, sticky="w", padx=18, pady=(8, 18))
         ctk.CTkEntry(panel, textvariable=self.download_dir, height=38, border_color=COLORS["border"]).grid(
             row=1, column=1, sticky="ew", pady=(8, 18)
         )
