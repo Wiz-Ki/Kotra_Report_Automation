@@ -348,7 +348,7 @@ class KotraReportAppV2(ctk.CTk):
             command=self._choose_input,
         )
         input_button.grid(row=0, column=2, sticky="e", padx=18, pady=(18, 8))
-        self._attach_tooltip(input_button, "자동 생성에 사용할 입력 엑셀 파일을 선택합니다.")
+        self._attach_tooltip(input_button, "보고서 자동생성에 사용할 엑셀 파일을 선택합니다.")
 
         self._field_label(panel, "저장 폴더").grid(row=1, column=0, sticky="w", padx=18, pady=(8, 18))
         ctk.CTkEntry(panel, textvariable=self.download_dir, height=38, border_color=COLORS["border"]).grid(
@@ -505,7 +505,7 @@ class KotraReportAppV2(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
         )
         self.start_button.pack(side="left")
-        self._attach_tooltip(self.start_button, "선택한 입력 파일과 옵션으로 보고서 자동 생성을 시작합니다.")
+        self._attach_tooltip(self.start_button, "선택된 입력 파일과 옵션으로 보고서 자동 생성을 시작합니다.")
 
         self.stop_button = ctk.CTkButton(
             left,
