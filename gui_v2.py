@@ -767,7 +767,14 @@ class KotraReportAppV2(ctk.CTk):
 
     def _create_template(self) -> None:
         path = create_input_template()
-        messagebox.showinfo("완료", f"입력 템플릿을 생성했습니다.\n{path}")
+        opened_file, _ = self._open_path(path)
+        if not opened_file:
+            self._open_path(path.parent)
+
+        messagebox.showinfo(
+            "완료",
+            f"입력 템플릿 저장 위치\n{path}",
+        )
 
     def _open_download_dir(self) -> None:
         self._open_folder(Path(self.download_dir.get()))
@@ -776,16 +783,22 @@ class KotraReportAppV2(ctk.CTk):
         self._open_folder(DEFAULT_LOG_DIR)
 
     def _open_folder(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        opened, exc = self._open_path(path)
+        if not opened:
+            messagebox.showerror("폴더 열기 실패", f"폴더를 열 수 없습니다.\n{path}\n\n{exc}")
+
+    def _open_path(self, path: Path) -> tuple[bool, Exception | None]:
         try:
-            path.mkdir(parents=True, exist_ok=True)
             if sys.platform.startswith("win"):
                 os.startfile(path)  # type: ignore[attr-defined]
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(path)])
             else:
                 subprocess.Popen(["xdg-open", str(path)])
+            return True, None
         except Exception as exc:
-            messagebox.showerror("폴더 열기 실패", f"폴더를 열 수 없습니다.\n{path}\n\n{exc}")
+            return False, exc
 
     def _show_about(self) -> None:
         dialog = ctk.CTkToplevel(self)
