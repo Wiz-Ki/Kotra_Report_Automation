@@ -14,6 +14,9 @@ state.json
 usage_monitor/data/
 usage_monitor/output/
 
+usage_monitor/
+report_check_tool/
+
 # Local input/test files
 input.xlsx
 test*.xlsx
