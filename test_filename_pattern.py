@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from automation import render_filename_pattern
+from automation import render_filename_pattern, split_country_values
 
 
 class FilenamePatternTest(unittest.TestCase):
@@ -69,6 +69,19 @@ class FilenamePatternTest(unittest.TestCase):
                 suggested_filename="report.pdf",
                 now=datetime(2026, 6, 9, 14, 30, 12),
             )
+
+    def test_renders_recommendation_tokens(self) -> None:
+        filename = render_filename_pattern(
+            "{report_mode}_{excluded_countries}_{hs_code}",
+            {"report_mode": "recommend", "excluded_countries": "중국, 미국", "hs_code": "330499"},
+            suggested_filename="report.pdf",
+            now=datetime(2026, 6, 9, 14, 30, 12),
+        )
+
+        self.assertEqual(filename, "유망 시장 추천 보고서 생성_중국, 미국_330499.pdf")
+
+    def test_splits_country_values(self) -> None:
+        self.assertEqual(split_country_values("베트남, 미국/일본\n베트남"), ["베트남", "미국", "일본"])
 
 
 if __name__ == "__main__":

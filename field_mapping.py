@@ -1,4 +1,4 @@
-FIELD_MAPPING = {
+COMMON_FIELD_MAPPING = {
     "hs_code": {
         "label": "수출품 HS CODE",
         "selector_key": "hs_code_input",
@@ -58,11 +58,32 @@ FIELD_MAPPING = {
             "X": "처음입니다",
         },
     },
+}
+
+
+DIRECT_FIELD_MAPPING = {
+    **COMMON_FIELD_MAPPING,
     "target_country": {
         "label": "희망 진출 국가",
         "selector_key": "target_country_input",
         "type": "input",
         "required": True,
+    },
+}
+
+
+RECOMMEND_FIELD_MAPPING = {
+    **COMMON_FIELD_MAPPING,
+}
+
+
+FIELD_MAPPING = {
+    **DIRECT_FIELD_MAPPING,
+    "excluded_countries": {
+        "label": "분석 제외 국가",
+        "selector_key": "excluded_country_input",
+        "type": "excluded_countries",
+        "required": False,
     },
 }
 
@@ -111,9 +132,17 @@ SOURCE_COLUMN_ALIASES = {
         "희망 진출 국가",
         "진출국가",
         "국가명",
-        "국가",
         "수출국",
         "수출국가",
+    ],
+    "excluded_countries": [
+        "excluded_countries",
+        "분석 제외 국가",
+        "분석제외국가",
+        "제외 국가",
+        "제외국가",
+        "추천 제외 국가",
+        "추천제외국가",
     ],
 }
 
@@ -147,6 +176,7 @@ EXAMPLE_ROWS = [
         "export_scale": "초보기업 ($1 ~ $99,999)",
         "export_experience": "X",
         "target_country": "베트남",
+        "excluded_countries": "",
     },
     {
         "hs_code": "200599",
@@ -154,6 +184,7 @@ EXAMPLE_ROWS = [
         "export_scale": "유망기업 ($100,000 ~ $999,999)",
         "export_experience": "O",
         "target_country": "일본",
+        "excluded_countries": "",
     },
     {
         "hs_code": "330499",
@@ -161,6 +192,7 @@ EXAMPLE_ROWS = [
         "export_scale": "성장기업 ($1,000,000 ~ $9,999,999)",
         "export_experience": "X",
         "target_country": "미국",
+        "excluded_countries": "중국",
     },
 ]
 
@@ -173,7 +205,8 @@ ORIGINAL_TEMPLATE_COLUMNS = [
     "해당 품목 수출 경험(필수: O/X)",
     "HS CODE(필수: 6자리 숫자)",
     "수출품명(선택: 구체적으로 작성 권장)",
-    "희망진출국가(필수: 국가 1개만 입력)",
+    "희망진출국가(직접분석: 최대 2개, 없으면 공란 가능)",
+    "분석 제외 국가(추천보고서: 없으면 공란 가능)",
 ]
 
 
@@ -186,7 +219,8 @@ ORIGINAL_EXAMPLE_ROWS = [
         "해당 품목 수출 경험(필수: O/X)": "X",
         "HS CODE(필수: 6자리 숫자)": "330499",
         "수출품명(선택: 구체적으로 작성 권장)": "스킨케어",
-        "희망진출국가(필수: 국가 1개만 입력)": "베트남",
+        "희망진출국가(직접분석: 최대 2개, 없으면 공란 가능)": "베트남, 미국",
+        "분석 제외 국가(추천보고서: 없으면 공란 가능)": "중국",
     },
     {
         "연번(선택)": 2,
@@ -196,7 +230,8 @@ ORIGINAL_EXAMPLE_ROWS = [
         "해당 품목 수출 경험(필수: O/X)": "O",
         "HS CODE(필수: 6자리 숫자)": "220600",
         "수출품명(선택: 구체적으로 작성 권장)": "전통 쌀 발효주(막걸리)",
-        "희망진출국가(필수: 국가 1개만 입력)": "일본",
+        "희망진출국가(직접분석: 최대 2개, 없으면 공란 가능)": "일본",
+        "분석 제외 국가(추천보고서: 없으면 공란 가능)": "",
     },
     {
         "연번(선택)": 3,
@@ -206,6 +241,7 @@ ORIGINAL_EXAMPLE_ROWS = [
         "해당 품목 수출 경험(필수: O/X)": "O",
         "HS CODE(필수: 6자리 숫자)": "210390",
         "수출품명(선택: 구체적으로 작성 권장)": "할랄 비건 콜라겐, 유산균 핫소스",
-        "희망진출국가(필수: 국가 1개만 입력)": "미국",
+        "희망진출국가(직접분석: 최대 2개, 없으면 공란 가능)": "",
+        "분석 제외 국가(추천보고서: 없으면 공란 가능)": "이스라엘",
     },
 ]

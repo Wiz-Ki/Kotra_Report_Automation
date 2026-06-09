@@ -44,6 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-auto-retry", action="store_true", help="행 처리 실패 시 기본 1회 자동 재시도를 사용하지 않습니다.")
     parser.add_argument("--parallel-sessions", type=parallel_session_count, default=1, help=f"동시에 실행할 브라우저 세션 수(1~{MAX_PARALLEL_SESSIONS})")
     parser.add_argument(
+        "--report-mode",
+        choices=["direct", "recommend"],
+        default="direct",
+        help="생성할 보고서 방식: direct=수출시장 분석, recommend=유망 시장 추천",
+    )
+    parser.add_argument("--recommend-then-direct", action="store_true", help="유망 시장 추천 보고서 생성 후 추천 국가로 수출시장 분석 보고서까지 생성합니다.")
+    parser.add_argument(
         "--filename-pattern",
         default="",
         help="저장 파일명 커스텀 패턴. 예: {row_index}_{hs_code}_{product_name}_{datetime}",
@@ -92,6 +99,8 @@ def main() -> int:
         parallel_sessions=args.parallel_sessions,
         row_retry_count=0 if args.no_auto_retry else DEFAULT_ROW_RETRY_COUNT,
         filename_pattern=args.filename_pattern,
+        report_mode=args.report_mode,
+        recommend_then_direct=args.recommend_then_direct,
     )
 
     print("작업이 완료되었습니다.")

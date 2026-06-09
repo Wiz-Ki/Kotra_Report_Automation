@@ -87,6 +87,8 @@ FILENAME_PREVIEW_ROW = {
     "hs_code": "330499",
     "product_name": "스킨케어",
     "target_country": "베트남",
+    "excluded_countries": "중국",
+    "report_mode": "direct",
 }
 
 
@@ -254,10 +256,12 @@ class KotraReportAppV2(ctk.CTk):
         self.input_path = tk.StringVar(value=str(BASE_DIR / "input.xlsx"))
         self.download_dir = tk.StringVar(value=str(DEFAULT_DOWNLOAD_DIR))
         self.run_mode = tk.StringVar(value="전체 실행")
+        self.report_mode = tk.StringVar(value="direct")
         self.background = tk.BooleanVar(value=False)
         self.use_session = tk.BooleanVar(value=False)
         self.auto_retry = tk.BooleanVar(value=True)
         self.custom_filename = tk.BooleanVar(value=False)
+        self.recommend_then_direct = tk.BooleanVar(value=False)
         self.filename_pattern = tk.StringVar(value=DEFAULT_FILENAME_PATTERN)
         self.filename_text_part = tk.StringVar(value="")
         self.filename_preview = tk.StringVar(value="")
@@ -293,6 +297,9 @@ class KotraReportAppV2(ctk.CTk):
         self.parallel_options_frame: ctk.CTkFrame | None = None
         self.parallel_sessions_menu: ctk.CTkOptionMenu | None = None
         self.mode_buttons: dict[str, ctk.CTkButton] = {}
+        self.report_mode_buttons: dict[str, ctk.CTkButton] = {}
+        self.recommend_then_direct_frame: ctk.CTkFrame | None = None
+        self.recommend_then_direct_switch: ctk.CTkSwitch | None = None
         self.tooltips: list[HoverTooltip] = []
 
         self.stop_requested = False
@@ -655,8 +662,13 @@ class KotraReportAppV2(ctk.CTk):
         mode_box = ctk.CTkFrame(panel, fg_color="transparent")
         mode_box.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 8))
         mode_box.grid_columnconfigure(0, weight=1)
-        self._field_label(mode_box, "실행 범위").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self._build_mode_selector(mode_box).grid(row=1, column=0, sticky="ew")
+        self._field_label(mode_box, "보고서 생성 방식").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self._build_report_mode_selector(mode_box).grid(row=1, column=0, sticky="ew")
+        recommend_option = self._build_recommend_then_direct_option(mode_box)
+        recommend_option.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self._refresh_recommend_then_direct_visibility()
+        self._field_label(mode_box, "실행 범위").grid(row=3, column=0, sticky="w", pady=(14, 8))
+        self._build_mode_selector(mode_box).grid(row=4, column=0, sticky="ew")
 
         switch_box = ctk.CTkFrame(
             panel,
@@ -665,7 +677,7 @@ class KotraReportAppV2(ctk.CTk):
             border_color="#e2e8f0",
             corner_radius=8,
         )
-        switch_box.grid(row=0, column=1, sticky="nsew", padx=18, pady=(18, 8))
+        switch_box.grid(row=0, column=1, sticky="new", padx=18, pady=(18, 8))
         switch_box.grid_columnconfigure(0, weight=1)
         self.background_switch = ctk.CTkSwitch(
             switch_box,
@@ -974,6 +986,64 @@ class KotraReportAppV2(ctk.CTk):
         self._refresh_run_mode_buttons()
         return selector
 
+    def _build_report_mode_selector(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        selector = ctk.CTkFrame(parent, fg_color="#eef3f9", corner_radius=10)
+        for column in range(2):
+            selector.grid_columnconfigure(column, weight=1)
+        self.report_mode_buttons = {}
+        modes = [
+            ("수출시장 분석 보고서 생성", "direct"),
+            ("유망 시장 추천 보고서 생성", "recommend"),
+        ]
+        for column, (label, value) in enumerate(modes):
+            button = ctk.CTkButton(
+                selector,
+                text=label,
+                height=38,
+                corner_radius=8,
+                border_width=0,
+                command=lambda selected=value: self._select_report_mode(selected),
+                font=ctk.CTkFont(size=13, weight="bold"),
+            )
+            button.grid(row=0, column=column, sticky="ew", padx=(4 if column == 0 else 2, 4), pady=4)
+            self.report_mode_buttons[value] = button
+            if value == "direct":
+                self._attach_tooltip(button, "희망 진출국을 기준으로 국가별 수출시장 분석 보고서를 생성합니다.")
+            else:
+                self._attach_tooltip(button, "유망 시장 추천 보고서를 생성합니다. 기본값은 추천 보고서만 저장합니다.")
+        self._refresh_report_mode_buttons()
+        return selector
+
+    def _build_recommend_then_direct_option(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(
+            parent,
+            fg_color=COLORS["surface_alt"],
+            border_width=1,
+            border_color="#e2e8f0",
+            corner_radius=8,
+        )
+        frame.grid_columnconfigure(0, weight=1)
+        self.recommend_then_direct_switch = ctk.CTkSwitch(
+            frame,
+            text="추천 국가로 수출시장 분석보고서 생성 연동",
+            variable=self.recommend_then_direct,
+            fg_color="#cbd5e1",
+            progress_color=COLORS["primary"],
+            button_color="#ffffff",
+            button_hover_color="#f8fafc",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14),
+        )
+        self.recommend_then_direct_switch.grid(row=0, column=0, sticky="w", padx=14, pady=12)
+        self._attach_tooltip(
+            self.recommend_then_direct_switch,
+            "추천 보고서 생성 후 추천 국가를 추출해 수출시장 분석보고서 생성까지 이어서 실행합니다.",
+        )
+        self.recommend_then_direct_frame = frame
+        if self.report_mode.get() != "recommend":
+            frame.grid_remove()
+        return frame
+
     def _select_run_mode(self, value: str) -> None:
         self.run_mode.set(value)
         self._refresh_run_mode_buttons()
@@ -986,6 +1056,28 @@ class KotraReportAppV2(ctk.CTk):
                 hover_color="#ffffff" if selected else "#e2eaf3",
                 text_color=COLORS["primary"] if selected else COLORS["muted"],
             )
+
+    def _select_report_mode(self, value: str) -> None:
+        self.report_mode.set(value)
+        self._refresh_report_mode_buttons()
+        self._refresh_recommend_then_direct_visibility()
+
+    def _refresh_report_mode_buttons(self) -> None:
+        for value, button in self.report_mode_buttons.items():
+            selected = self.report_mode.get() == value
+            button.configure(
+                fg_color="#ffffff" if selected else "transparent",
+                hover_color="#ffffff" if selected else "#e2eaf3",
+                text_color=COLORS["primary"] if selected else COLORS["muted"],
+            )
+
+    def _refresh_recommend_then_direct_visibility(self) -> None:
+        if self.recommend_then_direct_frame is None:
+            return
+        if self.report_mode.get() == "recommend":
+            self.recommend_then_direct_frame.grid()
+        else:
+            self.recommend_then_direct_frame.grid_remove()
 
     def _metric_card(self, parent: ctk.CTkFrame, column: int, label: str, variable: tk.StringVar, color: str) -> None:
         card = ctk.CTkFrame(parent, fg_color=COLORS["surface_alt"], corner_radius=8)
@@ -1622,6 +1714,10 @@ class KotraReportAppV2(ctk.CTk):
                 )
         if self.parallel_sessions_menu is not None:
             self.parallel_sessions_menu.configure(state="disabled" if running else "normal")
+        for button in self.report_mode_buttons.values():
+            button.configure(state="disabled" if running else "normal")
+        if self.recommend_then_direct_switch is not None:
+            self.recommend_then_direct_switch.configure(state="disabled" if running else "normal")
         for option_switch in (self.background_switch, self.use_session_switch):
             if option_switch is not None:
                 option_switch.configure(state="disabled" if running else "normal")
@@ -1708,6 +1804,8 @@ class KotraReportAppV2(ctk.CTk):
                 row_retry_count=DEFAULT_ROW_RETRY_COUNT,
                 auto_retry_enabled=self._auto_retry_enabled,
                 filename_pattern=self.active_filename_pattern,
+                report_mode=self.report_mode.get(),
+                recommend_then_direct=self.report_mode.get() == "recommend" and self.recommend_then_direct.get(),
                 status_callback=lambda message: self.events.put(("status", message)),
                 progress_callback=lambda data: self.events.put(("progress", data)),
                 stop_requested=lambda: self.stop_requested,

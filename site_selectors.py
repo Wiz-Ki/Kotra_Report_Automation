@@ -6,6 +6,7 @@ README의 codegen 안내를 참고해 이 파일만 교체하면 됩니다.
 """
 
 SELECTORS = {
+    "recommend_analysis_button": "text=유망 시장 추천 받기",
     "direct_analysis_button": "text=희망 국가 직접 분석",
 
     "hs_code_input": "input[placeholder*='6자리']",
@@ -16,6 +17,11 @@ SELECTORS = {
     "export_experience_has": "text=수출 경험 있음",
 
     "target_country_input": "input[placeholder*='미국']",
+    "excluded_country_input": "xpath=//label[contains(normalize-space(.), '분석 제외 국가')]/following::input[1]",
+    "excluded_country_add_button": "xpath=//label[contains(normalize-space(.), '분석 제외 국가')]/following::button[.//*[normalize-space(.)='+'] or normalize-space(.)='+'][1]",
+    "market_analysis_section": "xpath=//*[contains(normalize-space(.), '국가별 시장 분석')]/ancestor::*[self::div or self::section][1]",
+    "market_analysis_card": "xpath=//*[contains(normalize-space(.), '국가별 시장 분석')]/following::*[.//button][self::div or self::section][position() <= 8]",
+    "market_country_chip": "button",
 
     "generate_button": "button:has-text('보고서 생성')",
     "download_button": "button:has-text('PDF 저장')",

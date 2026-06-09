@@ -6,6 +6,7 @@ import importlib.util
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from pathlib import Path
@@ -32,9 +33,11 @@ from config import (
     TIMEOUT_MS,
 )
 from field_mapping import (
+    DIRECT_FIELD_MAPPING,
     EXPORT_EXPERIENCE_CATEGORY_MAP,
     EXPORT_SCALE_CATEGORY_MAP,
     FIELD_MAPPING,
+    RECOMMEND_FIELD_MAPPING,
     SOURCE_COLUMN_ALIASES,
 )
 from logger import log_failed_row, log_success_row
@@ -58,6 +61,14 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 StopFlag = Callable[[], bool]
 RetryFlag = Callable[[], bool]
 
+REPORT_MODE_DIRECT = "direct"
+REPORT_MODE_RECOMMEND = "recommend"
+REPORT_MODE_LABELS = {
+    REPORT_MODE_DIRECT: "수출시장 분석 보고서 생성",
+    REPORT_MODE_RECOMMEND: "유망 시장 추천 보고서 생성",
+}
+MAX_DIRECT_COUNTRIES = 2
+
 PROCESSING_STATUS_FILENAME = "processing_status.xlsx"
 SOURCE_FILE_COLUMN = "원본파일"
 STATUS_COLUMN = "처리상태"
@@ -72,12 +83,18 @@ STATUS_COLUMNS = [
 ]
 PROCESSING_STATUS_COLUMNS = [
     SOURCE_FILE_COLUMN,
+    "report_mode",
     "row_index",
     "hs_code",
     "product_name",
     "export_scale",
     "export_experience",
     "target_country",
+    "excluded_countries",
+    "recommended_countries",
+    "final_target_countries",
+    "recommendation_report_file",
+    "direct_report_files",
     *STATUS_COLUMNS,
 ]
 STATUS_PENDING = "처리 안됨"
@@ -94,6 +111,8 @@ FILENAME_PATTERN_TOKEN_LABELS = [
     ("HS CODE", "hs_code"),
     ("수출품명", "product_name"),
     ("희망진출국가", "target_country"),
+    ("분석제외국가", "excluded_countries"),
+    ("보고서생성방식", "report_mode"),
     ("생성날짜", "date"),
     ("생성시간", "time"),
     ("생성일시", "datetime"),
@@ -118,6 +137,21 @@ class GenerationError(RuntimeError):
 
 class AutomationAborted(RuntimeError):
     pass
+
+
+@dataclass
+class RowProcessResult:
+    saved_files: list[Path]
+    recommendation_report_file: Path | None = None
+    direct_report_files: list[Path] | None = None
+    recommended_countries: list[str] | None = None
+    final_target_countries: list[str] | None = None
+
+    def saved_files_text(self) -> str:
+        return "; ".join(str(path) for path in self.saved_files)
+
+    def saved_file_names_text(self) -> str:
+        return ", ".join(path.name for path in self.saved_files)
 
 
 def launch_browser(playwright: Any, headless: bool, status_callback: StatusCallback | None = None):
@@ -200,11 +234,22 @@ def select_direct_country_analysis(page: Page) -> None:
     button.click()
 
 
-def fill_form(page: Page, row_data: dict[str, Any]) -> None:
+def select_recommend_market_analysis(page: Page) -> None:
     """
-    FIELD_MAPPING을 기준으로 엑셀 한 행의 데이터를 사이트 입력창에 채운다.
+    분석 방식에서 '유망 시장 추천 받기'를 선택한다.
     """
-    for column_name, field_info in FIELD_MAPPING.items():
+    button = page.locator(SELECTORS["recommend_analysis_button"]).first
+    button.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+    button.scroll_into_view_if_needed()
+    button.click()
+
+
+def fill_form(page: Page, row_data: dict[str, Any], field_mapping: dict[str, dict[str, Any]] | None = None) -> None:
+    """
+    field_mapping을 기준으로 엑셀 한 행의 데이터를 사이트 입력창에 채운다.
+    """
+    mapping = field_mapping or DIRECT_FIELD_MAPPING
+    for column_name, field_info in mapping.items():
         value = str(row_data.get(column_name, "")).strip()
 
         if field_info.get("required") and not value:
@@ -422,6 +467,24 @@ def click_button_group_option(page: Page, field_info: dict[str, Any], value: str
     option.click()
 
 
+def fill_excluded_countries(page: Page, row_data: dict[str, Any]) -> None:
+    countries = split_country_values(row_data.get("excluded_countries", ""))
+    if not countries:
+        return
+
+    input_locator = page.locator(SELECTORS["excluded_country_input"]).first
+    add_button = page.locator(SELECTORS["excluded_country_add_button"]).first
+    input_locator.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+
+    for country in countries:
+        input_locator.scroll_into_view_if_needed()
+        input_locator.fill(country)
+        add_button.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+        wait_until_enabled(page, add_button, ELEMENT_TIMEOUT_MS)
+        add_button.click()
+        page.wait_for_timeout(250)
+
+
 def click_generate_button(page: Page) -> None:
     button = page.locator(SELECTORS["generate_button"]).first
     button.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
@@ -572,6 +635,8 @@ def save_failure_artifacts(
         f"export_scale: {row_data.get('export_scale', '')}",
         f"export_experience: {row_data.get('export_experience', '')}",
         f"target_country: {row_data.get('target_country', '')}",
+        f"excluded_countries: {row_data.get('excluded_countries', '')}",
+        f"report_mode: {row_data.get('report_mode', '')}",
         f"url: {page.url}",
         f"error_message: {error_message}",
         "",
@@ -688,6 +753,8 @@ def render_filename_pattern(
         "hs_code": str(row_data.get("hs_code", "")).strip(),
         "product_name": str(row_data.get("product_name", "")).strip(),
         "target_country": str(row_data.get("target_country", "")).strip(),
+        "excluded_countries": str(row_data.get("excluded_countries", "")).strip(),
+        "report_mode": REPORT_MODE_LABELS.get(normalize_report_mode(row_data.get("report_mode", "")), str(row_data.get("report_mode", "")).strip()),
         "date": current_time.strftime("%Y%m%d"),
         "time": current_time.strftime("%H%M%S"),
         "datetime": current_time.strftime("%Y%m%d_%H%M%S"),
@@ -816,14 +883,229 @@ def process_row(
     status_callback: StatusCallback | None = None,
     force_stop_requested: StopFlag | None = None,
     filename_pattern: str = "",
+) -> RowProcessResult:
+    report_mode = normalize_report_mode(row_data.get("report_mode", REPORT_MODE_DIRECT))
+    if report_mode == REPORT_MODE_RECOMMEND:
+        return process_recommendation_row(
+            page,
+            row_data,
+            save_path,
+            log_dir,
+            diagnostic_events,
+            timeout_ms,
+            retry_count,
+            status_callback,
+            force_stop_requested,
+            filename_pattern,
+        )
+
+    return process_direct_row(
+        page,
+        row_data,
+        save_path,
+        log_dir,
+        diagnostic_events,
+        timeout_ms,
+        retry_count,
+        status_callback,
+        force_stop_requested,
+        filename_pattern,
+    )
+
+
+def process_direct_row(
+    page: Page,
+    row_data: dict[str, Any],
+    save_path: str | Path,
+    log_dir: str | Path,
+    diagnostic_events: list[str],
+    timeout_ms: int,
+    retry_count: int,
+    status_callback: StatusCallback | None,
+    force_stop_requested: StopFlag | None,
+    filename_pattern: str,
+) -> RowProcessResult:
+    target_countries = split_country_values(row_data.get("target_country", ""))[:MAX_DIRECT_COUNTRIES]
+    if not target_countries:
+        raise ValueError("희망 진출 국가가 없어 수출시장 분석 보고서를 생성할 수 없습니다.")
+
+    direct_report_files: list[Path] = []
+    for index, country in enumerate(target_countries):
+        if index > 0:
+            reset_for_next_row(page)
+        saved_direct_report = process_direct_country_report(
+            page,
+            row_data,
+            country,
+            save_path,
+            log_dir,
+            diagnostic_events,
+            timeout_ms,
+            retry_count,
+            status_callback,
+            force_stop_requested,
+            filename_pattern,
+        )
+        direct_report_files.append(saved_direct_report)
+        row_data["direct_report_files"] = "; ".join(str(path) for path in direct_report_files)
+
+    row_data["final_target_countries"] = join_country_values(target_countries)
+    return RowProcessResult(
+        saved_files=direct_report_files,
+        direct_report_files=direct_report_files,
+        final_target_countries=target_countries,
+    )
+
+
+def process_recommendation_row(
+    page: Page,
+    row_data: dict[str, Any],
+    save_path: str | Path,
+    log_dir: str | Path,
+    diagnostic_events: list[str],
+    timeout_ms: int,
+    retry_count: int,
+    status_callback: StatusCallback | None,
+    force_stop_requested: StopFlag | None,
+    filename_pattern: str,
+) -> RowProcessResult:
+    recommendation_report = process_recommendation_report(
+        page,
+        row_data,
+        save_path,
+        log_dir,
+        diagnostic_events,
+        timeout_ms,
+        retry_count,
+        status_callback,
+        force_stop_requested,
+        filename_pattern,
+    )
+
+    row_data["recommendation_report_file"] = str(recommendation_report)
+    if not truthy(row_data.get("recommend_then_direct", False)):
+        return RowProcessResult(
+            saved_files=[recommendation_report],
+            recommendation_report_file=recommendation_report,
+        )
+
+    existing_targets = split_country_values(row_data.get("target_country", ""))[:MAX_DIRECT_COUNTRIES]
+    needed_count = MAX_DIRECT_COUNTRIES - len(existing_targets)
+    recommended = extract_recommended_countries(page, row_data, needed_count)
+    final_targets = (existing_targets + recommended)[:MAX_DIRECT_COUNTRIES]
+    row_data["recommended_countries"] = join_country_values(recommended)
+    row_data["final_target_countries"] = join_country_values(final_targets)
+
+    if len(final_targets) < MAX_DIRECT_COUNTRIES:
+        raise ValueError("추천 결과에서 직접 분석 대상 국가 2개를 확보하지 못했습니다.")
+
+    direct_report_files: list[Path] = []
+    for country in final_targets:
+        reset_for_next_row(page)
+        saved_direct_report = process_direct_country_report(
+            page,
+            row_data,
+            country,
+            save_path,
+            log_dir,
+            diagnostic_events,
+            timeout_ms,
+            retry_count,
+            status_callback,
+            force_stop_requested,
+            filename_pattern,
+        )
+        direct_report_files.append(saved_direct_report)
+        row_data["direct_report_files"] = "; ".join(str(path) for path in direct_report_files)
+
+    return RowProcessResult(
+        saved_files=[recommendation_report, *direct_report_files],
+        recommendation_report_file=recommendation_report,
+        direct_report_files=direct_report_files,
+        recommended_countries=recommended,
+        final_target_countries=final_targets,
+    )
+
+
+def process_direct_country_report(
+    page: Page,
+    row_data: dict[str, Any],
+    country: str,
+    save_path: str | Path,
+    log_dir: str | Path,
+    diagnostic_events: list[str],
+    timeout_ms: int,
+    retry_count: int,
+    status_callback: StatusCallback | None,
+    force_stop_requested: StopFlag | None,
+    filename_pattern: str,
 ) -> Path:
+    direct_row = {**row_data, "target_country": country}
     check_force_stop(force_stop_requested)
     select_direct_country_analysis(page)
     check_force_stop(force_stop_requested)
-    fill_form(page, row_data)
+    fill_form(page, direct_row, DIRECT_FIELD_MAPPING)
     check_force_stop(force_stop_requested)
     click_generate_button(page)
+    return submit_and_download_report(
+        page,
+        direct_row,
+        save_path,
+        log_dir,
+        diagnostic_events,
+        timeout_ms,
+        retry_count,
+        status_callback,
+        force_stop_requested,
+        filename_pattern,
+    )
 
+
+def process_recommendation_report(
+    page: Page,
+    row_data: dict[str, Any],
+    save_path: str | Path,
+    log_dir: str | Path,
+    diagnostic_events: list[str],
+    timeout_ms: int,
+    retry_count: int,
+    status_callback: StatusCallback | None,
+    force_stop_requested: StopFlag | None,
+    filename_pattern: str,
+) -> Path:
+    check_force_stop(force_stop_requested)
+    select_recommend_market_analysis(page)
+    check_force_stop(force_stop_requested)
+    fill_form(page, row_data, RECOMMEND_FIELD_MAPPING)
+    fill_excluded_countries(page, row_data)
+    check_force_stop(force_stop_requested)
+    click_generate_button(page)
+    return submit_and_download_report(
+        page,
+        row_data,
+        save_path,
+        log_dir,
+        diagnostic_events,
+        timeout_ms,
+        retry_count,
+        status_callback,
+        force_stop_requested,
+        filename_pattern,
+    )
+
+
+def submit_and_download_report(
+    page: Page,
+    row_data: dict[str, Any],
+    save_path: str | Path,
+    log_dir: str | Path,
+    diagnostic_events: list[str],
+    timeout_ms: int,
+    retry_count: int,
+    status_callback: StatusCallback | None,
+    force_stop_requested: StopFlag | None,
+    filename_pattern: str,
+) -> Path:
     last_error: Exception | None = None
     for attempt in range(retry_count + 1):
         try:
@@ -868,6 +1150,125 @@ def process_row(
             retry_generation(page)
 
     raise RuntimeError("보고서 생성 재시도 후에도 실패했습니다.") from last_error
+
+
+def normalize_report_mode(value: Any) -> str:
+    text = str(value or REPORT_MODE_DIRECT).strip().lower()
+    if text in {REPORT_MODE_RECOMMEND, "recommendation", "유망 시장 추천 보고서 생성", "유망 시장 추천", "추천"}:
+        return REPORT_MODE_RECOMMEND
+    return REPORT_MODE_DIRECT
+
+
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "o", "on", "사용", "사용함", "켜짐"}
+
+
+def split_country_values(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"[,/\n]+", text)
+    countries: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        country = normalize_single_country(part)
+        key = normalize_country_key(country)
+        if country and key not in seen:
+            seen.add(key)
+            countries.append(country)
+    return countries
+
+
+def normalize_single_country(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ,")
+
+
+def join_country_values(countries: list[str]) -> str:
+    return ", ".join(country for country in countries if country)
+
+
+def normalize_country_key(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip()).lower()
+
+
+def extract_recommended_countries(page: Page, row_data: dict[str, Any], needed_count: int) -> list[str]:
+    if needed_count <= 0:
+        return []
+
+    blocked = {
+        normalize_country_key(country)
+        for country in [
+            *split_country_values(row_data.get("target_country", "")),
+            *split_country_values(row_data.get("excluded_countries", "")),
+        ]
+    }
+    selected: list[str] = []
+    selected_keys: set[str] = set()
+
+    for country in recommended_country_candidates_by_card(page):
+        key = normalize_country_key(country)
+        if not key or key in blocked or key in selected_keys:
+            continue
+        selected.append(country)
+        selected_keys.add(key)
+        if len(selected) >= needed_count:
+            return selected
+
+    for country in recommended_country_candidates_from_section(page):
+        key = normalize_country_key(country)
+        if not key or key in blocked or key in selected_keys:
+            continue
+        selected.append(country)
+        selected_keys.add(key)
+        if len(selected) >= needed_count:
+            return selected
+
+    return selected
+
+
+def recommended_country_candidates_by_card(page: Page) -> list[str]:
+    candidates: list[str] = []
+    try:
+        cards = page.locator(SELECTORS["market_analysis_card"])
+        for index in range(cards.count()):
+            chips = cards.nth(index).locator(SELECTORS["market_country_chip"])
+            if chips.count() == 0:
+                continue
+            text = normalize_recommended_country_text(chips.first.inner_text(timeout=2_000))
+            if text:
+                candidates.append(text)
+    except Exception:
+        return candidates
+    return candidates
+
+
+def recommended_country_candidates_from_section(page: Page) -> list[str]:
+    try:
+        section = page.locator(SELECTORS["market_analysis_section"]).first
+        section.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+        texts = section.locator("button").all_inner_texts()
+    except Exception:
+        return []
+
+    candidates: list[str] = []
+    for text in texts:
+        country = normalize_recommended_country_text(text)
+        if country:
+            candidates.append(country)
+    return candidates
+
+
+def normalize_recommended_country_text(value: Any) -> str:
+    text = normalize_single_country(value)
+    if not text or len(text) > 30:
+        return ""
+    if any(token in text for token in ("PDF", "저장", "새로운 분석", "보고서")):
+        return ""
+    return text
 
 
 def normalize_parallel_sessions(parallel_sessions: int) -> int:
@@ -1167,7 +1568,7 @@ def run_parallel_automation(
                         with file_lock:
                             update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
 
-                        saved_file = process_row(
+                        row_result = process_row(
                             page,
                             row_data,
                             download_dir,
@@ -1184,12 +1585,13 @@ def run_parallel_automation(
                             force_stop_requested=force_stop_requested,
                             filename_pattern=filename_pattern,
                         )
+                        saved_files_text = row_result.saved_files_text()
                         with file_lock:
-                            log_success_row(row_data, saved_file, log_dir)
-                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_file)
+                            log_success_row(row_data, saved_files_text, log_dir)
+                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_files_text)
                         mark_result(current_index, True)
                         clear_wait_status(session_id)
-                        emit_status(f"{prefix} 성공: {saved_file.name}")
+                        emit_status(f"{prefix} 성공: {row_result.saved_file_names_text()}")
 
                     except AutomationAborted:
                         emit_status(f"[세션 {session_id}] 강제종료 요청으로 작업을 즉시 중단합니다.")
@@ -1312,6 +1714,8 @@ def run_automation(
     row_retry_count: int = DEFAULT_ROW_RETRY_COUNT,
     auto_retry_enabled: RetryFlag | None = None,
     filename_pattern: str = "",
+    report_mode: str = REPORT_MODE_DIRECT,
+    recommend_then_direct: bool = False,
 ) -> dict[str, int]:
     input_excel_path = Path(input_excel_path)
     download_dir = Path(download_dir)
@@ -1319,11 +1723,15 @@ def run_automation(
     state_path = Path(state_path)
     filename_pattern = normalize_filename_pattern(filename_pattern)
     validate_filename_pattern(filename_pattern)
+    report_mode = normalize_report_mode(report_mode)
 
     download_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
     rows = read_failed_rows(log_dir) if retry_failed_only else read_input_excel(input_excel_path)
+    for row in rows:
+        row["report_mode"] = report_mode
+        row["recommend_then_direct"] = bool(recommend_then_direct)
     total = len(rows)
     row_retry_count = normalize_row_retry_count(row_retry_count)
     success_count = 0
@@ -1473,7 +1881,7 @@ def run_automation(
                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
 
                 try:
-                    saved_file = process_row(
+                    row_result = process_row(
                         page,
                         row_data,
                         download_dir,
@@ -1485,12 +1893,13 @@ def run_automation(
                         force_stop_requested=force_stop_requested,
                         filename_pattern=filename_pattern,
                     )
-                    log_success_row(row_data, saved_file, log_dir)
+                    saved_files_text = row_result.saved_files_text()
+                    log_success_row(row_data, saved_files_text, log_dir)
                     resolve_retry_pending_failure(current_index, success=True)
                     success_count += 1
                     completed_count += 1
-                    update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_file)
-                    emit_status(f"[{row_label}] 성공: {saved_file.name}")
+                    update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_files_text)
+                    emit_status(f"[{row_label}] 성공: {row_result.saved_file_names_text()}")
 
                 except AutomationAborted:
                     emit_status("강제종료 요청으로 작업을 즉시 중단합니다.")
@@ -1641,12 +2050,18 @@ def update_processing_status(
 def build_processing_status_row(input_excel_path: str | Path, row_data: dict[str, Any]) -> dict[str, str]:
     return {
         SOURCE_FILE_COLUMN: str(Path(input_excel_path)),
+        "report_mode": str(row_data.get("report_mode", "")),
         "row_index": str(row_data.get("row_index", "")),
         "hs_code": str(row_data.get("hs_code", "")),
         "product_name": str(row_data.get("product_name", "")),
         "export_scale": str(row_data.get("export_scale", "")),
         "export_experience": str(row_data.get("export_experience", "")),
         "target_country": str(row_data.get("target_country", "")),
+        "excluded_countries": str(row_data.get("excluded_countries", "")),
+        "recommended_countries": str(row_data.get("recommended_countries", "")),
+        "final_target_countries": str(row_data.get("final_target_countries", "")),
+        "recommendation_report_file": str(row_data.get("recommendation_report_file", "")),
+        "direct_report_files": str(row_data.get("direct_report_files", "")),
         STATUS_COLUMN: str(row_data.get("process_status", "")),
         STATUS_AT_COLUMN: "",
         SAVED_FILE_COLUMN: str(row_data.get("saved_file", "")),
@@ -1700,6 +2115,10 @@ def read_input_excel(input_excel_path: str | Path) -> list[dict[str, Any]]:
         row["process_status"] = ""
         row["saved_file"] = ""
         row["error_message"] = ""
+        row["recommended_countries"] = ""
+        row["final_target_countries"] = ""
+        row["recommendation_report_file"] = ""
+        row["direct_report_files"] = ""
         rows.append(row)
 
     return rows
@@ -1829,7 +2248,7 @@ def normalize_field_value(field_name: str, value: Any) -> str:
             return normalized
         return EXPORT_EXPERIENCE_CATEGORY_MAP.get(text, text)
 
-    if field_name == "target_country":
+    if field_name in {"target_country", "excluded_countries"}:
         return normalize_target_country(text)
 
     return text
