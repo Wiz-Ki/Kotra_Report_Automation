@@ -11,6 +11,8 @@ portable_python_broken*/
 downloads/
 logs/
 state.json
+usage_monitor/data/
+usage_monitor/output/
 
 # Local input/test files
 input.xlsx

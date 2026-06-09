@@ -428,6 +428,7 @@ class KotraReportAppV2(ctk.CTk):
             font=ctk.CTkFont(size=14),
         )
         self.auto_retry_switch.grid(row=2, column=0, sticky="w", padx=16, pady=(0, 14))
+        self.auto_retry_switch.select()
         self._attach_tooltip(self.auto_retry_switch, "실패한 항목을 자동으로 한 번 더 시도합니다. 실행 중 변경하면 이후 실패부터 반영됩니다.")
 
         self._build_parallel_options(panel)
