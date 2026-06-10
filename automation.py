@@ -473,16 +473,44 @@ def fill_excluded_countries(page: Page, row_data: dict[str, Any]) -> None:
         return
 
     input_locator = page.locator(SELECTORS["excluded_country_input"]).first
-    add_button = page.locator(SELECTORS["excluded_country_add_button"]).first
     input_locator.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
 
     for country in countries:
         input_locator.scroll_into_view_if_needed()
         input_locator.fill(country)
-        add_button.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
-        wait_until_enabled(page, add_button, ELEMENT_TIMEOUT_MS)
-        add_button.click()
+        click_excluded_country_add_button(page, input_locator)
         page.wait_for_timeout(250)
+
+
+def click_excluded_country_add_button(page: Page, input_locator) -> None:
+    attempts = [
+        lambda: input_locator.press("Enter", timeout=3_000),
+        lambda: page.locator(SELECTORS["excluded_country_add_button"]).first.click(timeout=3_000),
+        lambda: input_locator.locator("xpath=following-sibling::button[1]").click(timeout=3_000),
+        lambda: input_locator.locator("xpath=../following-sibling::button[1]").click(timeout=3_000),
+        lambda: click_right_of_locator(page, input_locator),
+    ]
+
+    last_error: Exception | None = None
+    for attempt in attempts:
+        try:
+            attempt()
+            return
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"분석 제외 국가 추가 버튼을 클릭하지 못했습니다: {last_error}")
+
+
+def click_right_of_locator(page: Page, locator) -> None:
+    box = locator.bounding_box()
+    if not box:
+        raise RuntimeError("입력칸 위치를 확인하지 못했습니다.")
+
+    # 제외 국가 입력칸 오른쪽에 붙은 '+' 버튼 중앙을 좌표 fallback으로 클릭합니다.
+    x = box["x"] + box["width"] + 34
+    y = box["y"] + box["height"] / 2
+    page.mouse.click(x, y)
 
 
 def click_generate_button(page: Page) -> None:
