@@ -308,6 +308,14 @@ def fill_form(page: Page, row_data: dict[str, Any], field_mapping: dict[str, dic
             raise ValueError(f"지원하지 않는 입력 타입입니다: {field_type}")
 
 
+def _dropdown_selected(dropdown, candidates: list[str]) -> bool:
+    try:
+        text = dropdown.inner_text(timeout=1_000).strip().replace(" ", "")
+        return any(c.replace(" ", "") in text for c in candidates if c)
+    except Exception:
+        return False
+
+
 def select_dropdown(page: Page, selector_key: str, value: str, field_info: dict[str, Any] | None = None) -> None:
     selector = SELECTORS[selector_key]
     dropdown = page.locator(selector).first
@@ -321,7 +329,8 @@ def select_dropdown(page: Page, selector_key: str, value: str, field_info: dict[
         return
 
     if select_dropdown_by_keyboard(page, dropdown, candidates[0], field_info or {}):
-        return
+        if _dropdown_selected(dropdown, candidates):
+            return
 
     open_dropdown(page, dropdown, candidates)
     if click_dropdown_option(page, candidates):
@@ -545,7 +554,14 @@ def click_generate_button(page: Page) -> None:
     button.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
     button.scroll_into_view_if_needed()
     button.wait_for(state="attached", timeout=ELEMENT_TIMEOUT_MS)
-    wait_until_enabled(page, button, ELEMENT_TIMEOUT_MS)
+    try:
+        wait_until_enabled(page, button, ELEMENT_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise ValueError(
+            "보고서 생성 버튼이 활성화되지 않습니다. "
+            "필수 입력값(HS CODE, 수출액 규모, 수출 경험)이 누락되었거나 "
+            "드롭다운 선택이 반영되지 않은 것 같습니다."
+        ) from exc
     button.click()
 
 

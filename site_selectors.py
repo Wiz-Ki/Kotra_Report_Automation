@@ -18,7 +18,7 @@ SELECTORS = {
 
     "target_country_input": "input[placeholder*='미국']",
     "excluded_country_input": "xpath=//label[contains(normalize-space(.), '분석 제외 국가')]/following::input[1]",
-    "excluded_country_add_button": "xpath=//label[contains(normalize-space(.), '분석 제외 국가')]/following::button[.//*[normalize-space(.)='+'] or normalize-space(.)='+'][1]",
+    "excluded_country_add_button": "xpath=//input[@placeholder='제외할 국가명 입력']/following-sibling::button[1]",
     "market_analysis_section": "xpath=//*[contains(normalize-space(.), '국가별 시장 분석')]/ancestor::*[self::div or self::section][1]",
     "market_analysis_card": "xpath=//*[contains(normalize-space(.), '국가별 시장 분석')]/following::*[.//button][self::div or self::section][position() <= 8]",
     "market_country_chip": "button",
