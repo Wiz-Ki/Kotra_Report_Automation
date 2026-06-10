@@ -10,6 +10,7 @@ import pandas as pd
 from automation import (
     STATUS_SUCCESS,
     TASK_TYPE_DIRECT,
+    TASK_TYPE_RECOMMEND,
     completed_report_task,
     normalize_export_scale,
     normalize_hs_code,
@@ -20,6 +21,7 @@ from automation import (
     render_filename_pattern,
     split_country_values,
     update_report_task_status,
+    validate_hs_code,
 )
 from logger import log_failed_row
 
@@ -119,6 +121,11 @@ class FilenamePatternTest(unittest.TestCase):
         self.assertEqual(normalize_hs_code("3304990000"), "330499")
         self.assertEqual(normalize_hs_code("330499.0"), "330499")
 
+    def test_rejects_short_hs_code_instead_of_padding(self) -> None:
+        self.assertEqual(normalize_hs_code("123"), "123")
+        with self.assertRaises(ValueError):
+            validate_hs_code("123")
+
     def test_reads_external_request_template_shape(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "request_template.xlsx"
@@ -169,6 +176,28 @@ class FilenamePatternTest(unittest.TestCase):
             update_report_task_status(log_dir, row, TASK_TYPE_DIRECT, "베트남", "처리 중")
             task_rows = read_report_task_rows(report_tasks_path(log_dir))
             self.assertEqual(task_rows[-1]["saved_file"], "")
+
+    def test_report_task_identity_keeps_excluded_countries_separate(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir) / "logs"
+            saved_file = Path(tmp_dir) / "추천_중국제외.pdf"
+            saved_file.write_text("pdf", encoding="utf-8")
+            row = {
+                "report_mode": "recommend",
+                "recommend_then_direct": False,
+                "row_index": 1,
+                "hs_code": "330499",
+                "product_name": "마스크팩",
+                "target_country": "",
+                "excluded_countries": "중국",
+                "use_task_resume": True,
+            }
+
+            update_report_task_status(log_dir, row, TASK_TYPE_RECOMMEND, "", STATUS_SUCCESS, saved_file=saved_file)
+
+            other_excluded_row = {**row, "excluded_countries": "일본"}
+            self.assertIsNone(completed_report_task(log_dir, other_excluded_row, TASK_TYPE_RECOMMEND))
+            self.assertIsNotNone(completed_report_task(log_dir, row, TASK_TYPE_RECOMMEND))
 
     def test_failed_rows_restore_report_mode_options(self) -> None:
         with TemporaryDirectory() as tmp_dir:

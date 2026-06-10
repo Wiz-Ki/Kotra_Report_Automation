@@ -12,6 +12,7 @@ import pandas as pd
 
 
 SUCCESS_COLUMNS = [
+    "원본파일",
     "report_mode",
     "recommend_then_direct",
     "row_index",
@@ -30,6 +31,7 @@ SUCCESS_COLUMNS = [
 ]
 
 FAILED_COLUMNS = [
+    "원본파일",
     "report_mode",
     "recommend_then_direct",
     "row_index",
@@ -86,6 +88,7 @@ def log_failed_row(row_data: dict[str, Any], error_message: str, log_dir: str | 
 
 def _base_row(row_data: dict[str, Any]) -> dict[str, Any]:
     return {
+        "원본파일": row_data.get("원본파일", ""),
         "report_mode": row_data.get("report_mode", ""),
         "recommend_then_direct": row_data.get("recommend_then_direct", ""),
         "row_index": row_data.get("row_index", ""),

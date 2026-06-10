@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
 
 APP_CREDITS = {
     "app_name": "KOTRA 수출시장 분석보고서 자동생성기",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "purpose": (
         "수출시장 분석보고서 생성 과정의 반복 입력, "
         "보고서 생성 대기, 파일 다운로드 업무를 자동화하기 위해 제작된 "

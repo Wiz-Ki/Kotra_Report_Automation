@@ -85,6 +85,7 @@ STATUS_COLUMNS = [
 PROCESSING_STATUS_COLUMNS = [
     SOURCE_FILE_COLUMN,
     "report_mode",
+    "recommend_then_direct",
     "row_index",
     "hs_code",
     "product_name",
@@ -106,7 +107,9 @@ STATUS_FAILED = "처리실패"
 TASK_TYPE_RECOMMEND = "recommend"
 TASK_TYPE_DIRECT = "direct"
 REPORT_TASK_COLUMNS = [
+    SOURCE_FILE_COLUMN,
     "report_mode",
+    "recommend_then_direct",
     "row_index",
     "hs_code",
     "product_name",
@@ -277,6 +280,8 @@ def fill_form(page: Page, row_data: dict[str, Any], field_mapping: dict[str, dic
 
         if not value:
             continue
+        if column_name == "hs_code":
+            validate_hs_code(value)
 
         field_type = field_info["type"]
         selector_key = field_info["selector_key"]
@@ -1851,6 +1856,7 @@ def run_automation(
 
     rows = read_failed_rows(log_dir) if retry_failed_only else read_input_excel(input_excel_path)
     for row in rows:
+        row[SOURCE_FILE_COLUMN] = str(row.get(SOURCE_FILE_COLUMN, "") or input_excel_path)
         if retry_failed_only:
             row["report_mode"] = normalize_report_mode(row.get("report_mode", report_mode))
             raw_recommend_then_direct = str(row.get("recommend_then_direct", "")).strip()
@@ -2111,22 +2117,30 @@ def run_automation(
     }
 
 
-def row_identity(row_data: dict[str, Any]) -> tuple[str, str, str, str]:
+def row_identity(row_data: dict[str, Any]) -> tuple[str, ...]:
     return (
+        str(row_data.get(SOURCE_FILE_COLUMN, "")).strip(),
+        normalize_report_mode(row_data.get("report_mode", "")),
+        str(truthy(row_data.get("recommend_then_direct", False))),
         str(row_data.get("row_index", "")).strip(),
         str(row_data.get("hs_code", "")).strip(),
         str(row_data.get("product_name", "")).strip(),
-        str(row_data.get("target_country", "")).strip(),
+        normalize_country_key(row_data.get("target_country", "")),
+        normalize_country_key(row_data.get("excluded_countries", "")),
     )
 
 
-def log_record_identity(record: dict[str, Any], fallback_key: str = "") -> tuple[str, str, str, str]:
+def log_record_identity(record: dict[str, Any], fallback_key: str = "") -> tuple[str, ...]:
     row_index = str(record.get("row_index", "")).strip() or fallback_key
     return (
+        str(record.get(SOURCE_FILE_COLUMN, "")).strip(),
+        normalize_report_mode(record.get("report_mode", "")),
+        str(truthy(record.get("recommend_then_direct", False))),
         row_index,
         str(record.get("hs_code", "")).strip(),
         str(record.get("product_name", "")).strip(),
-        str(record.get("target_country", "")).strip(),
+        normalize_country_key(record.get("target_country", "")),
+        normalize_country_key(record.get("excluded_countries", "")),
     )
 
 
@@ -2173,11 +2187,12 @@ def update_processing_status(
     existing_rows = read_processing_status_rows(status_path)
     existing_by_key = {row_identity(row): row for row in existing_rows}
     ordered_keys = [row_identity(row) for row in existing_rows]
-    key = row_identity(row_data)
-    status_row = existing_by_key.get(key, build_processing_status_row(input_excel_path, row_data))
+    next_status_row = build_processing_status_row(input_excel_path, row_data)
+    key = row_identity(next_status_row)
+    status_row = existing_by_key.get(key, next_status_row)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    status_row.update(build_processing_status_row(input_excel_path, row_data))
+    status_row.update(next_status_row)
     status_row[STATUS_COLUMN] = status
     status_row[STATUS_AT_COLUMN] = now
     status_row[SAVED_FILE_COLUMN] = str(saved_file) if saved_file else str(row_data.get("saved_file", ""))
@@ -2195,8 +2210,9 @@ def update_processing_status(
 
 def build_processing_status_row(input_excel_path: str | Path, row_data: dict[str, Any]) -> dict[str, str]:
     return {
-        SOURCE_FILE_COLUMN: str(Path(input_excel_path)),
         "report_mode": str(row_data.get("report_mode", "")),
+        SOURCE_FILE_COLUMN: str(row_data.get(SOURCE_FILE_COLUMN, "") or Path(input_excel_path)),
+        "recommend_then_direct": str(row_data.get("recommend_then_direct", "")),
         "row_index": str(row_data.get("row_index", "")),
         "hs_code": str(row_data.get("hs_code", "")),
         "product_name": str(row_data.get("product_name", "")),
@@ -2300,7 +2316,9 @@ def completed_report_task(
 
 def build_report_task_row(row_data: dict[str, Any], task_type: str, country: str = "") -> dict[str, str]:
     return {
+        SOURCE_FILE_COLUMN: str(row_data.get(SOURCE_FILE_COLUMN, "")),
         "report_mode": str(row_data.get("report_mode", "")),
+        "recommend_then_direct": str(row_data.get("recommend_then_direct", "")),
         "row_index": str(row_data.get("row_index", "")),
         "hs_code": str(row_data.get("hs_code", "")),
         "product_name": str(row_data.get("product_name", "")),
@@ -2317,12 +2335,16 @@ def build_report_task_row(row_data: dict[str, Any], task_type: str, country: str
     }
 
 
-def report_task_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+def report_task_identity(row: dict[str, Any]) -> tuple[str, ...]:
     return (
+        str(row.get(SOURCE_FILE_COLUMN, "")).strip(),
+        normalize_report_mode(row.get("report_mode", "")),
+        str(truthy(row.get("recommend_then_direct", False))),
         str(row.get("row_index", "")).strip(),
         str(row.get("hs_code", "")).strip(),
         str(row.get("product_name", "")).strip(),
         normalize_country_key(row.get("target_country", "")),
+        normalize_country_key(row.get("excluded_countries", "")),
         str(row.get("task_type", "")).strip(),
         normalize_country_key(row.get("country", "")),
     )
@@ -2415,7 +2437,7 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
     df = pd.read_excel(path, dtype=str, keep_default_na=False)
     records = df.to_dict(orient="records")
     rows: list[dict[str, Any]] = []
-    seen_rows: set[tuple[str, str, str, str]] = set()
+    seen_rows: set[tuple[str, ...]] = set()
 
     for fallback_index, record in reversed(list(enumerate(records, start=1))):
         row_index_text = str(record.get("row_index", "")).strip()
@@ -2438,6 +2460,7 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
 
         row["report_mode"] = normalize_report_mode(str(record.get("report_mode", "")).strip())
         row["recommend_then_direct"] = str(record.get("recommend_then_direct", "")).strip()
+        row[SOURCE_FILE_COLUMN] = str(record.get(SOURCE_FILE_COLUMN, "")).strip()
         row["row_index"] = int(row_index_text) if row_index_text.isdigit() else fallback_index
         row["recommended_countries"] = str(record.get("recommended_countries", "")).strip()
         row["final_target_countries"] = str(record.get("final_target_countries", "")).strip()
@@ -2448,7 +2471,7 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
     return list(reversed(rows))
 
 
-def read_latest_success_times(log_dir: Path) -> dict[tuple[str, str, str, str], str]:
+def read_latest_success_times(log_dir: Path) -> dict[tuple[str, ...], str]:
     path = log_dir / "success_log.xlsx"
     if not path.exists():
         return {}
@@ -2619,7 +2642,13 @@ def normalize_hs_code(value: str) -> str:
     digits = re.sub(r"\D", "", value)
     if len(digits) >= 6:
         return digits[:6]
-    return digits.zfill(6) if digits else value
+    return digits if digits else value
+
+
+def validate_hs_code(value: Any) -> None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"\d{6}", text):
+        raise ValueError(f"HS CODE는 6자리 숫자여야 합니다. 현재 값: {text}")
 
 
 def normalize_target_country(value: str) -> str:
