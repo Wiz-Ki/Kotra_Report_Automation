@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from automation import normalize_export_scale, render_filename_pattern, split_country_values
+from automation import normalize_export_scale, normalize_hs_code, render_filename_pattern, split_country_values
 
 
 class FilenamePatternTest(unittest.TestCase):
@@ -96,6 +96,10 @@ class FilenamePatternTest(unittest.TestCase):
             normalize_export_scale("내수기업(수출액 없음)"),
             "내수기업 (수출액 없음)",
         )
+
+    def test_normalizes_ten_digit_hs_code_to_six_digits(self) -> None:
+        self.assertEqual(normalize_hs_code("3304990000"), "330499")
+        self.assertEqual(normalize_hs_code("330499.0"), "330499")
 
 
 if __name__ == "__main__":

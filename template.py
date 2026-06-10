@@ -39,9 +39,10 @@ def apply_template_style(path: Path) -> None:
         "D": 34,
         "E": 24,
         "F": 22,
-        "G": 34,
-        "H": 28,
-        "I": 34,
+        "G": 22,
+        "H": 34,
+        "I": 28,
+        "J": 34,
     }
     for column_letter, width in column_widths.items():
         sheet.column_dimensions[column_letter].width = width
@@ -59,7 +60,7 @@ def apply_template_style(path: Path) -> None:
         for cell in row:
             header = str(sheet.cell(1, cell.column).value or "")
             cell.font = Font(color="000000" if "필수" in header else "666666")
-            cell.alignment = Alignment(horizontal="center" if cell.column in {1, 4, 5, 6, 8, 9} else "left", vertical="center", wrap_text=True)
+            cell.alignment = Alignment(horizontal="center" if cell.column in {1, 4, 5, 6, 7, 9, 10} else "left", vertical="center", wrap_text=True)
             cell.border = border
 
     workbook.save(path)

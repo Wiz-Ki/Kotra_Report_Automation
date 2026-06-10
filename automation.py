@@ -2105,6 +2105,8 @@ def read_input_excel(input_excel_path: str | Path) -> list[dict[str, Any]]:
         row = {}
         for key in FIELD_MAPPING.keys():
             raw_value = get_source_value(record, key)
+            if key == "hs_code" and not raw_value:
+                raw_value = get_source_value(record, "hs_code_10")
             if not raw_value and key in {"export_scale", "export_experience"}:
                 raw_value = find_category_value(record)
             row[key] = normalize_field_value(key, raw_value)
@@ -2335,6 +2337,8 @@ def normalize_hs_code(value: str) -> str:
         value = value.split(".", 1)[0]
 
     digits = re.sub(r"\D", "", value)
+    if len(digits) >= 6:
+        return digits[:6]
     return digits.zfill(6) if digits else value
 
 
