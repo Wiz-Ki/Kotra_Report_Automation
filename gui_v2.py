@@ -1844,12 +1844,33 @@ class KotraReportAppV2(ctk.CTk):
     def _handle_done(self, payload: object) -> None:
         result = payload if isinstance(payload, dict) else {}
         failed = int(result.get("failed", 0) or 0)
-        self.status.set("완료")
-        self._set_status_badge("warning" if failed else "success")
-        self._append_log("작업이 완료되었습니다.", "success" if failed == 0 else "warning")
+        stopped = bool(result.get("stopped", False))
+        force_stopped = bool(result.get("force_stopped", False))
+        if force_stopped:
+            status_text = "강제종료됨"
+            badge = "danger"
+            log_text = "작업이 강제종료되었습니다. 처리 중이던 행은 실패로 기록되었습니다."
+            log_tag = "danger"
+            title = "강제종료됨"
+        elif stopped:
+            status_text = "중지됨"
+            badge = "warning"
+            log_text = "작업이 중지되었습니다."
+            log_tag = "warning"
+            title = "중지됨"
+        else:
+            status_text = "완료"
+            badge = "warning" if failed else "success"
+            log_text = "작업이 완료되었습니다."
+            log_tag = "success" if failed == 0 else "warning"
+            title = "완료"
+
+        self.status.set(status_text)
+        self._set_status_badge(badge)
+        self._append_log(log_text, log_tag)
         self._set_running_state(False)
         messagebox.showinfo(
-            "완료",
+            title,
             (
                 f"전체 {result.get('total', 0)}건\n"
                 f"성공 {result.get('success', 0)}건\n"

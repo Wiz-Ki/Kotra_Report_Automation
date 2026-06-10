@@ -7,7 +7,17 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from automation import normalize_export_scale, normalize_hs_code, read_input_excel, render_filename_pattern, split_country_values
+from automation import (
+    STATUS_SUCCESS,
+    TASK_TYPE_DIRECT,
+    completed_report_task,
+    normalize_export_scale,
+    normalize_hs_code,
+    read_input_excel,
+    render_filename_pattern,
+    split_country_values,
+    update_report_task_status,
+)
 
 
 class FilenamePatternTest(unittest.TestCase):
@@ -132,6 +142,25 @@ class FilenamePatternTest(unittest.TestCase):
         self.assertEqual(rows[0]["export_experience"], "O")
         self.assertEqual(rows[0]["target_country"], "베트남, 미국")
         self.assertEqual(rows[0]["excluded_countries"], "이스라엘")
+
+    def test_completed_report_task_requires_resume_flag_and_existing_file(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir) / "logs"
+            saved_file = Path(tmp_dir) / "베트남.pdf"
+            saved_file.write_text("pdf", encoding="utf-8")
+            row = {
+                "report_mode": "direct",
+                "row_index": 1,
+                "hs_code": "330499",
+                "product_name": "마스크팩",
+                "target_country": "베트남, 미국",
+            }
+
+            update_report_task_status(log_dir, row, TASK_TYPE_DIRECT, "베트남", STATUS_SUCCESS, saved_file=saved_file)
+
+            self.assertIsNone(completed_report_task(log_dir, row, TASK_TYPE_DIRECT, "베트남"))
+            row["use_task_resume"] = True
+            self.assertIsNotNone(completed_report_task(log_dir, row, TASK_TYPE_DIRECT, "베트남"))
 
 
 if __name__ == "__main__":

@@ -70,6 +70,7 @@ REPORT_MODE_LABELS = {
 MAX_DIRECT_COUNTRIES = 2
 
 PROCESSING_STATUS_FILENAME = "processing_status.xlsx"
+REPORT_TASKS_FILENAME = "report_tasks.xlsx"
 SOURCE_FILE_COLUMN = "원본파일"
 STATUS_COLUMN = "처리상태"
 STATUS_AT_COLUMN = "처리일시"
@@ -102,6 +103,25 @@ STATUS_RUNNING = "처리 중"
 STATUS_RETRY_PENDING = "자동 재시도 대기"
 STATUS_SUCCESS = "처리완료"
 STATUS_FAILED = "처리실패"
+TASK_TYPE_RECOMMEND = "recommend"
+TASK_TYPE_DIRECT = "direct"
+REPORT_TASK_COLUMNS = [
+    "report_mode",
+    "row_index",
+    "hs_code",
+    "product_name",
+    "target_country",
+    "excluded_countries",
+    "task_type",
+    "country",
+    "status",
+    "saved_file",
+    "recommended_countries",
+    "final_target_countries",
+    "error_message",
+    "updated_at",
+]
+REPORT_TASKS_LOCK = threading.Lock()
 PARALLEL_WAIT_SUMMARY_INTERVAL_SECONDS = 30
 PARALLEL_SESSION_START_DELAY_SECONDS = 3
 DEFAULT_INITIAL_FORM_WAIT_SECONDS = 10
@@ -959,23 +979,38 @@ def process_direct_row(
 
     direct_report_files: list[Path] = []
     for index, country in enumerate(target_countries):
+        completed_task = completed_report_task(log_dir, row_data, TASK_TYPE_DIRECT, country)
+        if completed_task is not None:
+            saved_file = Path(str(completed_task.get("saved_file", "")))
+            direct_report_files.append(saved_file)
+            row_data["direct_report_files"] = join_path_values(direct_report_files)
+            if status_callback:
+                status_callback(f"이미 완료된 수출시장 분석 보고서를 건너뜁니다: {country}")
+            continue
+
         if index > 0:
             reset_for_next_row(page)
-        saved_direct_report = process_direct_country_report(
-            page,
-            row_data,
-            country,
-            save_path,
-            log_dir,
-            diagnostic_events,
-            timeout_ms,
-            retry_count,
-            status_callback,
-            force_stop_requested,
-            filename_pattern,
-        )
+        update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_RUNNING)
+        try:
+            saved_direct_report = process_direct_country_report(
+                page,
+                row_data,
+                country,
+                save_path,
+                log_dir,
+                diagnostic_events,
+                timeout_ms,
+                retry_count,
+                status_callback,
+                force_stop_requested,
+                filename_pattern,
+            )
+        except Exception as exc:
+            update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
+            raise
         direct_report_files.append(saved_direct_report)
-        row_data["direct_report_files"] = "; ".join(str(path) for path in direct_report_files)
+        row_data["direct_report_files"] = join_path_values(direct_report_files)
+        update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_SUCCESS, saved_file=saved_direct_report)
 
     row_data["final_target_countries"] = join_country_values(target_countries)
     return RowProcessResult(
@@ -997,54 +1032,99 @@ def process_recommendation_row(
     force_stop_requested: StopFlag | None,
     filename_pattern: str,
 ) -> RowProcessResult:
-    recommendation_report = process_recommendation_report(
-        page,
-        row_data,
-        save_path,
-        log_dir,
-        diagnostic_events,
-        timeout_ms,
-        retry_count,
-        status_callback,
-        force_stop_requested,
-        filename_pattern,
+    recommend_then_direct = truthy(row_data.get("recommend_then_direct", False))
+    completed_recommend_task = completed_report_task(log_dir, row_data, TASK_TYPE_RECOMMEND)
+    can_skip_recommend = completed_recommend_task is not None and (
+        not recommend_then_direct or str(completed_recommend_task.get("final_target_countries", "")).strip()
     )
 
-    row_data["recommendation_report_file"] = str(recommendation_report)
-    if not truthy(row_data.get("recommend_then_direct", False)):
+    if can_skip_recommend:
+        recommendation_report = Path(str(completed_recommend_task.get("saved_file", "")))
+        row_data["recommendation_report_file"] = str(recommendation_report)
+        row_data["recommended_countries"] = str(completed_recommend_task.get("recommended_countries", ""))
+        row_data["final_target_countries"] = str(completed_recommend_task.get("final_target_countries", ""))
+        if status_callback:
+            status_callback("이미 완료된 유망 시장 추천 보고서를 건너뜁니다.")
+    else:
+        update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_RUNNING)
+        try:
+            recommendation_report = process_recommendation_report(
+                page,
+                row_data,
+                save_path,
+                log_dir,
+                diagnostic_events,
+                timeout_ms,
+                retry_count,
+                status_callback,
+                force_stop_requested,
+                filename_pattern,
+            )
+            row_data["recommendation_report_file"] = str(recommendation_report)
+        except Exception as exc:
+            update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_FAILED, error_message=str(exc))
+            raise
+
+    if not recommend_then_direct:
+        if not can_skip_recommend:
+            update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_SUCCESS, saved_file=recommendation_report)
         return RowProcessResult(
             saved_files=[recommendation_report],
             recommendation_report_file=recommendation_report,
         )
 
-    existing_targets = split_country_values(row_data.get("target_country", ""))[:MAX_DIRECT_COUNTRIES]
-    needed_count = MAX_DIRECT_COUNTRIES - len(existing_targets)
-    recommended = extract_recommended_countries(page, row_data, needed_count)
-    final_targets = (existing_targets + recommended)[:MAX_DIRECT_COUNTRIES]
-    row_data["recommended_countries"] = join_country_values(recommended)
-    row_data["final_target_countries"] = join_country_values(final_targets)
+    if can_skip_recommend:
+        recommended = split_country_values(row_data.get("recommended_countries", ""))
+        final_targets = split_country_values(row_data.get("final_target_countries", ""))[:MAX_DIRECT_COUNTRIES]
+    else:
+        try:
+            existing_targets = split_country_values(row_data.get("target_country", ""))[:MAX_DIRECT_COUNTRIES]
+            needed_count = MAX_DIRECT_COUNTRIES - len(existing_targets)
+            recommended = extract_recommended_countries(page, row_data, needed_count)
+            final_targets = (existing_targets + recommended)[:MAX_DIRECT_COUNTRIES]
+            row_data["recommended_countries"] = join_country_values(recommended)
+            row_data["final_target_countries"] = join_country_values(final_targets)
 
-    if len(final_targets) < MAX_DIRECT_COUNTRIES:
-        raise ValueError("추천 결과에서 직접 분석 대상 국가 2개를 확보하지 못했습니다.")
+            if len(final_targets) < MAX_DIRECT_COUNTRIES:
+                raise ValueError("추천 결과에서 직접 분석 대상 국가 2개를 확보하지 못했습니다.")
+            update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_SUCCESS, saved_file=recommendation_report)
+        except Exception as exc:
+            update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_FAILED, saved_file=recommendation_report, error_message=str(exc))
+            raise
 
     direct_report_files: list[Path] = []
     for country in final_targets:
+        completed_direct_task = completed_report_task(log_dir, row_data, TASK_TYPE_DIRECT, country)
+        if completed_direct_task is not None:
+            saved_file = Path(str(completed_direct_task.get("saved_file", "")))
+            direct_report_files.append(saved_file)
+            row_data["direct_report_files"] = join_path_values(direct_report_files)
+            if status_callback:
+                status_callback(f"이미 완료된 수출시장 분석 보고서를 건너뜁니다: {country}")
+            continue
+
         reset_for_next_row(page)
-        saved_direct_report = process_direct_country_report(
-            page,
-            row_data,
-            country,
-            save_path,
-            log_dir,
-            diagnostic_events,
-            timeout_ms,
-            retry_count,
-            status_callback,
-            force_stop_requested,
-            filename_pattern,
-        )
+        update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_RUNNING)
+        try:
+            saved_direct_report = process_direct_country_report(
+                page,
+                row_data,
+                country,
+                save_path,
+                log_dir,
+                diagnostic_events,
+                timeout_ms,
+                retry_count,
+                status_callback,
+                force_stop_requested,
+                filename_pattern,
+            )
+        except Exception as exc:
+            update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
+            raise
         direct_report_files.append(saved_direct_report)
-        row_data["direct_report_files"] = "; ".join(str(path) for path in direct_report_files)
+        row_data["direct_report_files"] = join_path_values(direct_report_files)
+        update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_SUCCESS, saved_file=saved_direct_report)
 
     return RowProcessResult(
         saved_files=[recommendation_report, *direct_report_files],
@@ -1404,7 +1484,7 @@ def run_parallel_automation(
     progress_callback: ProgressCallback | None,
     stop_requested: StopFlag | None,
     force_stop_requested: StopFlag | None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     total = len(rows)
     worker_count = min(normalize_parallel_sessions(parallel_sessions), total)
     row_retry_count = normalize_row_retry_count(row_retry_count)
@@ -1593,6 +1673,7 @@ def run_parallel_automation(
                         emit_progress(f"{prefix} 입력 및 보고서 생성 중")
                         emit_status(f"{prefix} 행 처리를 시작합니다.")
                         clear_diagnostics(diagnostic_events)
+                        row_data["use_task_resume"] = bool(retry_failed_only or row_attempt > 0)
                         with file_lock:
                             update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
 
@@ -1621,8 +1702,14 @@ def run_parallel_automation(
                         clear_wait_status(session_id)
                         emit_status(f"{prefix} 성공: {row_result.saved_file_names_text()}")
 
-                    except AutomationAborted:
-                        emit_status(f"[세션 {session_id}] 강제종료 요청으로 작업을 즉시 중단합니다.")
+                    except AutomationAborted as exc:
+                        clear_wait_status(session_id)
+                        error_message = str(exc) or "사용자 강제종료로 처리 중단"
+                        with file_lock:
+                            log_failed_row(row_data, error_message, log_dir)
+                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                        mark_result(current_index, False)
+                        emit_status(f"{prefix} 처리실패 기록 후 강제종료합니다: {error_message}")
                         break
 
                     except Exception as exc:
@@ -1713,7 +1800,13 @@ def run_parallel_automation(
 
     emit_progress("완료")
     with counter_lock:
-        result = {"total": total, "success": success_count, "failed": failed_count}
+        result = {
+            "total": total,
+            "success": success_count,
+            "failed": failed_count,
+            "stopped": intentionally_stopped,
+            "force_stopped": combined_force_stop_requested(),
+        }
 
     if worker_errors and result["success"] + result["failed"] == 0:
         raise RuntimeError("모든 병렬 세션이 시작 또는 처리 중 실패했습니다: " + " / ".join(worker_errors))
@@ -1744,7 +1837,7 @@ def run_automation(
     filename_pattern: str = "",
     report_mode: str = REPORT_MODE_DIRECT,
     recommend_then_direct: bool = False,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     input_excel_path = Path(input_excel_path)
     download_dir = Path(download_dir)
     log_dir = Path(log_dir)
@@ -1760,6 +1853,7 @@ def run_automation(
     for row in rows:
         row["report_mode"] = report_mode
         row["recommend_then_direct"] = bool(recommend_then_direct)
+        row["use_task_resume"] = bool(retry_failed_only)
     total = len(rows)
     row_retry_count = normalize_row_retry_count(row_retry_count)
     success_count = 0
@@ -1804,7 +1898,7 @@ def run_automation(
     if retry_failed_only and total == 0:
         emit_status("재시도할 실패 행이 없습니다.")
         emit_progress(0, "완료")
-        return {"total": 0, "success": 0, "failed": 0}
+        return {"total": 0, "success": 0, "failed": 0, "stopped": False, "force_stopped": False}
 
     if not retry_failed_only:
         initialize_processing_status(input_excel_path, log_dir, rows)
@@ -1812,7 +1906,7 @@ def run_automation(
     if total == 0:
         emit_status("처리할 입력 행이 없습니다.")
         emit_progress(0, "완료")
-        return {"total": 0, "success": 0, "failed": 0}
+        return {"total": 0, "success": 0, "failed": 0, "stopped": False, "force_stopped": False}
 
     parallel_sessions = normalize_parallel_sessions(parallel_sessions)
     if parallel_sessions > 1:
@@ -1906,6 +2000,7 @@ def run_automation(
                 emit_progress(completed_count, "입력 및 보고서 생성 중")
                 emit_status(f"[{row_label}] 행 처리를 시작합니다.")
                 clear_diagnostics(diagnostic_events)
+                row_data["use_task_resume"] = bool(retry_failed_only or row_attempt > 0)
                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
 
                 try:
@@ -1929,8 +2024,15 @@ def run_automation(
                     update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_files_text)
                     emit_status(f"[{row_label}] 성공: {row_result.saved_file_names_text()}")
 
-                except AutomationAborted:
-                    emit_status("강제종료 요청으로 작업을 즉시 중단합니다.")
+                except AutomationAborted as exc:
+                    error_message = str(exc) or "사용자 강제종료로 처리 중단"
+                    was_retry_pending_failure = resolve_retry_pending_failure(current_index, success=False)
+                    if not was_retry_pending_failure:
+                        failed_count += 1
+                    completed_count += 1
+                    log_failed_row(row_data, error_message, log_dir)
+                    update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                    emit_status(f"[{row_label}] 처리실패 기록 후 강제종료합니다: {error_message}")
                     break
 
                 except Exception as exc:
@@ -1994,7 +2096,14 @@ def run_automation(
             context.close()
             browser.close()
 
-    return {"total": total, "success": success_count, "failed": failed_count}
+    stopped = bool(stop_requested and stop_requested()) or bool(force_stop_requested and force_stop_requested())
+    return {
+        "total": total,
+        "success": success_count,
+        "failed": failed_count,
+        "stopped": stopped,
+        "force_stopped": bool(force_stop_requested and force_stop_requested()),
+    }
 
 
 def row_identity(row_data: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -2018,6 +2127,10 @@ def log_record_identity(record: dict[str, Any], fallback_key: str = "") -> tuple
 
 def processing_status_path(log_dir: str | Path) -> Path:
     return Path(log_dir) / PROCESSING_STATUS_FILENAME
+
+
+def report_tasks_path(log_dir: str | Path) -> Path:
+    return Path(log_dir) / REPORT_TASKS_FILENAME
 
 
 def initialize_processing_status(input_excel_path: str | Path, log_dir: str | Path, rows: list[dict[str, Any]]) -> None:
@@ -2117,6 +2230,118 @@ def write_processing_status_rows(path: Path, rows: list[dict[str, str]]) -> None
     df.to_excel(path, index=False)
 
 
+def update_report_task_status(
+    log_dir: str | Path,
+    row_data: dict[str, Any],
+    task_type: str,
+    country: str = "",
+    status: str = "",
+    *,
+    saved_file: str | Path = "",
+    error_message: str = "",
+) -> None:
+    with REPORT_TASKS_LOCK:
+        path = report_tasks_path(log_dir)
+        existing_rows = read_report_task_rows(path)
+        existing_by_key = {report_task_identity(row): row for row in existing_rows}
+        ordered_keys = [report_task_identity(row) for row in existing_rows]
+        task_row = build_report_task_row(row_data, task_type, country)
+        key = report_task_identity(task_row)
+        current_row = existing_by_key.get(key, task_row)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        current_row.update(task_row)
+        current_row["status"] = status
+        current_row["saved_file"] = str(saved_file) if saved_file else str(current_row.get("saved_file", ""))
+        current_row["recommended_countries"] = str(row_data.get("recommended_countries", current_row.get("recommended_countries", "")))
+        current_row["final_target_countries"] = str(row_data.get("final_target_countries", current_row.get("final_target_countries", "")))
+        current_row["error_message"] = error_message
+        current_row["updated_at"] = now
+
+        if key not in existing_by_key:
+            ordered_keys.append(key)
+        existing_by_key[key] = current_row
+        write_report_task_rows(path, [existing_by_key[item_key] for item_key in ordered_keys if item_key in existing_by_key])
+
+
+def completed_report_task(
+    log_dir: str | Path,
+    row_data: dict[str, Any],
+    task_type: str,
+    country: str = "",
+) -> dict[str, str] | None:
+    if not truthy(row_data.get("use_task_resume", False)):
+        return None
+
+    path = report_tasks_path(log_dir)
+    task_row = build_report_task_row(row_data, task_type, country)
+    key = report_task_identity(task_row)
+    for row in reversed(read_report_task_rows(path)):
+        if report_task_identity(row) != key:
+            continue
+        if str(row.get("status", "")) != STATUS_SUCCESS:
+            return None
+        saved_file = str(row.get("saved_file", "")).strip()
+        if not saved_file or not Path(saved_file).exists():
+            return None
+        return row
+    return None
+
+
+def build_report_task_row(row_data: dict[str, Any], task_type: str, country: str = "") -> dict[str, str]:
+    return {
+        "report_mode": str(row_data.get("report_mode", "")),
+        "row_index": str(row_data.get("row_index", "")),
+        "hs_code": str(row_data.get("hs_code", "")),
+        "product_name": str(row_data.get("product_name", "")),
+        "target_country": str(row_data.get("target_country", "")),
+        "excluded_countries": str(row_data.get("excluded_countries", "")),
+        "task_type": str(task_type),
+        "country": normalize_single_country(country),
+        "status": "",
+        "saved_file": "",
+        "recommended_countries": str(row_data.get("recommended_countries", "")),
+        "final_target_countries": str(row_data.get("final_target_countries", "")),
+        "error_message": "",
+        "updated_at": "",
+    }
+
+
+def report_task_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(row.get("row_index", "")).strip(),
+        str(row.get("hs_code", "")).strip(),
+        str(row.get("product_name", "")).strip(),
+        normalize_country_key(row.get("target_country", "")),
+        str(row.get("task_type", "")).strip(),
+        normalize_country_key(row.get("country", "")),
+    )
+
+
+def read_report_task_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+
+    df = pd.read_excel(path, dtype=str, keep_default_na=False)
+    rows: list[dict[str, str]] = []
+    for record in df.to_dict(orient="records"):
+        rows.append({column: str(record.get(column, "")) for column in REPORT_TASK_COLUMNS})
+    return rows
+
+
+def write_report_task_rows(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(
+        [{column: row.get(column, "") for column in REPORT_TASK_COLUMNS} for row in rows],
+        columns=REPORT_TASK_COLUMNS,
+    )
+    df.to_excel(path, index=False)
+
+
+def join_path_values(paths: list[Path]) -> str:
+    return "; ".join(str(path) for path in paths)
+
+
 def read_input_excel(input_excel_path: str | Path) -> list[dict[str, Any]]:
     path = Path(input_excel_path)
     if not path.exists():
@@ -2202,6 +2427,10 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
             row[key] = normalize_field_value(key, raw_value)
 
         row["row_index"] = int(row_index_text) if row_index_text.isdigit() else fallback_index
+        row["recommended_countries"] = str(record.get("recommended_countries", "")).strip()
+        row["final_target_countries"] = str(record.get("final_target_countries", "")).strip()
+        row["recommendation_report_file"] = str(record.get("recommendation_report_file", "")).strip()
+        row["direct_report_files"] = str(record.get("direct_report_files", "")).strip()
         rows.append(row)
 
     return list(reversed(rows))
