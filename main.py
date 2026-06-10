@@ -6,10 +6,12 @@ from pathlib import Path
 from config import (
     BASE_DIR,
     DEFAULT_CONFIG,
+    DEFAULT_DIRECT_REPORT_COUNT,
     DEFAULT_DOWNLOAD_DIR,
     DEFAULT_INPUT_EXCEL,
     DEFAULT_LOG_DIR,
     DEFAULT_ROW_RETRY_COUNT,
+    MAX_DIRECT_REPORT_COUNT,
     MAX_PARALLEL_SESSIONS,
 )
 
@@ -22,6 +24,17 @@ def parallel_session_count(value: str) -> int:
 
     if count < 1 or count > MAX_PARALLEL_SESSIONS:
         raise argparse.ArgumentTypeError(f"병렬 세션 수는 1~{MAX_PARALLEL_SESSIONS} 사이여야 합니다.")
+    return count
+
+
+def direct_report_count(value: str) -> int:
+    try:
+        count = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("보고서 생성 개수는 숫자여야 합니다.") from exc
+
+    if count < 1 or count > MAX_DIRECT_REPORT_COUNT:
+        raise argparse.ArgumentTypeError(f"보고서 생성 개수는 1~{MAX_DIRECT_REPORT_COUNT} 사이여야 합니다.")
     return count
 
 
@@ -43,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-failed", action="store_true", help="logs/failed_rows.xlsx에 기록된 실패 행만 다시 실행합니다.")
     parser.add_argument("--no-auto-retry", action="store_true", help="행 처리 실패 시 기본 1회 자동 재시도를 사용하지 않습니다.")
     parser.add_argument("--parallel-sessions", type=parallel_session_count, default=1, help=f"동시에 실행할 브라우저 세션 수(1~{MAX_PARALLEL_SESSIONS})")
+    parser.add_argument(
+        "--direct-report-count",
+        type=direct_report_count,
+        default=DEFAULT_DIRECT_REPORT_COUNT,
+        help=f"추천 연동 시 생성할 수출시장 분석보고서 수(1~{MAX_DIRECT_REPORT_COUNT}, 기본 {DEFAULT_DIRECT_REPORT_COUNT})",
+    )
     parser.add_argument(
         "--report-mode",
         choices=["direct", "recommend"],
@@ -98,6 +117,7 @@ def main() -> int:
         wait_for_manual_login=args.login_wait,
         parallel_sessions=args.parallel_sessions,
         row_retry_count=0 if args.no_auto_retry else DEFAULT_ROW_RETRY_COUNT,
+        direct_report_count=args.direct_report_count,
         filename_pattern=args.filename_pattern,
         report_mode=args.report_mode,
         recommend_then_direct=args.recommend_then_direct,

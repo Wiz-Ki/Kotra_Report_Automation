@@ -23,6 +23,8 @@ PAGE_LOAD_TIMEOUT_MS = 120 * 1000
 ELEMENT_TIMEOUT_MS = 60 * 1000
 GENERATION_RETRY_COUNT = 2
 DEFAULT_ROW_RETRY_COUNT = 1
+DEFAULT_DIRECT_REPORT_COUNT = 2
+MAX_DIRECT_REPORT_COUNT = 5
 DEFAULT_PARALLEL_SESSIONS = 3
 MAX_PARALLEL_SESSIONS = 5
 
@@ -39,6 +41,8 @@ DEFAULT_CONFIG = {
     "state_path": str(DEFAULT_STATE_PATH),
     "retry_count": GENERATION_RETRY_COUNT,
     "row_retry_count": DEFAULT_ROW_RETRY_COUNT,
+    "direct_report_count": DEFAULT_DIRECT_REPORT_COUNT,
+    "max_direct_report_count": MAX_DIRECT_REPORT_COUNT,
     "use_storage_state": False,
     "save_storage_state": False,
     "default_parallel_sessions": DEFAULT_PARALLEL_SESSIONS,

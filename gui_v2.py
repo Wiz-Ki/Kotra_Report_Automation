@@ -17,11 +17,13 @@ from automation import FILENAME_PATTERN_TOKEN_LABELS, render_filename_pattern, r
 from config import (
     APP_CREDITS,
     BASE_DIR,
+    DEFAULT_DIRECT_REPORT_COUNT,
     DEFAULT_DOWNLOAD_DIR,
     DEFAULT_LOG_DIR,
     DEFAULT_PARALLEL_SESSIONS,
     DEFAULT_ROW_RETRY_COUNT,
     DEFAULT_STATE_PATH,
+    MAX_DIRECT_REPORT_COUNT,
     MAX_PARALLEL_SESSIONS,
 )
 from template import create_input_template
@@ -261,6 +263,7 @@ class KotraReportAppV2(ctk.CTk):
         self.auto_retry = tk.BooleanVar(value=True)
         self.custom_filename = tk.BooleanVar(value=False)
         self.recommend_then_direct = tk.BooleanVar(value=False)
+        self.direct_report_count = tk.StringVar(value=str(DEFAULT_DIRECT_REPORT_COUNT))
         self.filename_pattern = tk.StringVar(value=DEFAULT_FILENAME_PATTERN)
         self.filename_text_part = tk.StringVar(value="")
         self.filename_preview = tk.StringVar(value="")
@@ -299,6 +302,7 @@ class KotraReportAppV2(ctk.CTk):
         self.report_mode_buttons: dict[str, ctk.CTkButton] = {}
         self.recommend_then_direct_frame: ctk.CTkFrame | None = None
         self.recommend_then_direct_switch: ctk.CTkSwitch | None = None
+        self.direct_report_count_menu: ctk.CTkOptionMenu | None = None
         self.tooltips: list[HoverTooltip] = []
 
         self.stop_requested = False
@@ -1021,11 +1025,38 @@ class KotraReportAppV2(ctk.CTk):
             button_hover_color="#f8fafc",
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=14),
+            command=self._refresh_recommend_then_direct_visibility,
         )
         self.recommend_then_direct_switch.grid(row=0, column=0, sticky="w", padx=14, pady=12)
         self._attach_tooltip(
             self.recommend_then_direct_switch,
             "추천 보고서 생성 후 추천 국가를 추출해 수출시장 분석보고서 생성까지 이어서 실행합니다.",
+        )
+        count_box = ctk.CTkFrame(frame, fg_color="transparent")
+        count_box.grid(row=0, column=1, sticky="e", padx=14, pady=10)
+        ctk.CTkLabel(
+            count_box,
+            text="분석보고서 수",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(side="left", padx=(0, 8))
+
+        self.direct_report_count_menu = ctk.CTkOptionMenu(
+            count_box,
+            variable=self.direct_report_count,
+            values=[str(value) for value in range(1, MAX_DIRECT_REPORT_COUNT + 1)],
+            width=76,
+            height=32,
+            fg_color=COLORS["surface"],
+            button_color=COLORS["primary"],
+            button_hover_color=COLORS["primary_hover"],
+            text_color=COLORS["text"],
+            dropdown_fg_color=COLORS["surface"],
+        )
+        self.direct_report_count_menu.pack(side="left")
+        self._attach_tooltip(
+            self.direct_report_count_menu,
+            "엑셀 희망진출국가와 추천 국가를 합쳐 만들 수출시장 분석보고서 총 개수입니다.",
         )
         self.recommend_then_direct_frame = frame
         if self.report_mode.get() != "recommend":
@@ -1053,6 +1084,10 @@ class KotraReportAppV2(ctk.CTk):
             self.recommend_then_direct_frame.grid()
         else:
             self.recommend_then_direct_frame.grid_remove()
+        if self.direct_report_count_menu is not None:
+            self.direct_report_count_menu.configure(
+                state="normal" if self.report_mode.get() == "recommend" and self.recommend_then_direct.get() else "disabled"
+            )
 
     def _metric_card(self, parent: ctk.CTkFrame, column: int, label: str, variable: tk.StringVar, color: str) -> None:
         card = ctk.CTkFrame(parent, fg_color=COLORS["surface_alt"], corner_radius=8)
@@ -1615,6 +1650,14 @@ class KotraReportAppV2(ctk.CTk):
 
         return max(1, min(MAX_PARALLEL_SESSIONS, value))
 
+    def _selected_direct_report_count(self) -> int:
+        try:
+            value = int(self.direct_report_count.get())
+        except ValueError:
+            return DEFAULT_DIRECT_REPORT_COUNT
+
+        return max(1, min(MAX_DIRECT_REPORT_COUNT, value))
+
     def _start(self) -> None:
         self._start_run(retry_failed_only=False)
 
@@ -1699,6 +1742,13 @@ class KotraReportAppV2(ctk.CTk):
                 )
         if self.parallel_sessions_menu is not None:
             self.parallel_sessions_menu.configure(state="disabled" if running else "normal")
+        if self.direct_report_count_menu is not None:
+            enabled = (
+                not running
+                and self.report_mode.get() == "recommend"
+                and self.recommend_then_direct.get()
+            )
+            self.direct_report_count_menu.configure(state="normal" if enabled else "disabled")
         for button in self.report_mode_buttons.values():
             button.configure(state="disabled" if running else "normal")
         if self.recommend_then_direct_switch is not None:
@@ -1787,6 +1837,7 @@ class KotraReportAppV2(ctk.CTk):
                 wait_for_manual_login=False,
                 parallel_sessions=self._selected_parallel_sessions(),
                 row_retry_count=DEFAULT_ROW_RETRY_COUNT,
+                direct_report_count=self._selected_direct_report_count(),
                 auto_retry_enabled=self._auto_retry_enabled,
                 filename_pattern=self.active_filename_pattern,
                 report_mode=self.report_mode.get(),

@@ -13,6 +13,7 @@ from automation import (
     TASK_TYPE_RECOMMEND,
     completed_report_task,
     normalize_export_scale,
+    normalize_direct_report_count,
     normalize_hs_code,
     read_report_task_rows,
     report_tasks_path,
@@ -125,6 +126,12 @@ class FilenamePatternTest(unittest.TestCase):
         self.assertEqual(normalize_hs_code("123"), "123")
         with self.assertRaises(ValueError):
             validate_hs_code("123")
+
+    def test_normalizes_direct_report_count_with_limits(self) -> None:
+        self.assertEqual(normalize_direct_report_count("3"), 3)
+        self.assertEqual(normalize_direct_report_count("0"), 1)
+        self.assertEqual(normalize_direct_report_count("999"), 5)
+        self.assertEqual(normalize_direct_report_count("bad"), 2)
 
     def test_reads_external_request_template_shape(self) -> None:
         with TemporaryDirectory() as tmp_dir:

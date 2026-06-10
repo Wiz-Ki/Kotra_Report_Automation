@@ -21,6 +21,7 @@ from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as 
 
 from config import (
     DEFAULT_DOWNLOAD_DIR,
+    DEFAULT_DIRECT_REPORT_COUNT,
     DEFAULT_HEADLESS,
     DEFAULT_LOG_DIR,
     DEFAULT_ROW_RETRY_COUNT,
@@ -28,6 +29,7 @@ from config import (
     ELEMENT_TIMEOUT_MS,
     GENERATION_RETRY_COUNT,
     KOTRA_REPORT_URL,
+    MAX_DIRECT_REPORT_COUNT,
     MAX_PARALLEL_SESSIONS,
     PAGE_LOAD_TIMEOUT_MS,
     TIMEOUT_MS,
@@ -67,8 +69,6 @@ REPORT_MODE_LABELS = {
     REPORT_MODE_DIRECT: "수출시장 분석 보고서 생성",
     REPORT_MODE_RECOMMEND: "유망 시장 추천 보고서 생성",
 }
-MAX_DIRECT_COUNTRIES = 2
-
 PROCESSING_STATUS_FILENAME = "processing_status.xlsx"
 REPORT_TASKS_FILENAME = "report_tasks.xlsx"
 SOURCE_FILE_COLUMN = "원본파일"
@@ -86,6 +86,7 @@ PROCESSING_STATUS_COLUMNS = [
     SOURCE_FILE_COLUMN,
     "report_mode",
     "recommend_then_direct",
+    "direct_report_count",
     "row_index",
     "hs_code",
     "product_name",
@@ -110,6 +111,7 @@ REPORT_TASK_COLUMNS = [
     SOURCE_FILE_COLUMN,
     "report_mode",
     "recommend_then_direct",
+    "direct_report_count",
     "row_index",
     "hs_code",
     "product_name",
@@ -936,8 +938,10 @@ def process_row(
     status_callback: StatusCallback | None = None,
     force_stop_requested: StopFlag | None = None,
     filename_pattern: str = "",
+    direct_report_count: int = DEFAULT_DIRECT_REPORT_COUNT,
 ) -> RowProcessResult:
     report_mode = normalize_report_mode(row_data.get("report_mode", REPORT_MODE_DIRECT))
+    direct_report_count = normalize_direct_report_count(row_data.get("direct_report_count", direct_report_count))
     if report_mode == REPORT_MODE_RECOMMEND:
         return process_recommendation_row(
             page,
@@ -950,6 +954,7 @@ def process_row(
             status_callback,
             force_stop_requested,
             filename_pattern,
+            direct_report_count,
         )
 
     return process_direct_row(
@@ -963,6 +968,7 @@ def process_row(
         status_callback,
         force_stop_requested,
         filename_pattern,
+        direct_report_count,
     )
 
 
@@ -977,8 +983,10 @@ def process_direct_row(
     status_callback: StatusCallback | None,
     force_stop_requested: StopFlag | None,
     filename_pattern: str,
+    direct_report_count: int,
 ) -> RowProcessResult:
-    target_countries = split_country_values(row_data.get("target_country", ""))[:MAX_DIRECT_COUNTRIES]
+    direct_report_count = normalize_direct_report_count(direct_report_count)
+    target_countries = split_country_values(row_data.get("target_country", ""))[:direct_report_count]
     if not target_countries:
         raise ValueError("희망 진출 국가가 없어 수출시장 분석 보고서를 생성할 수 없습니다.")
 
@@ -1036,11 +1044,18 @@ def process_recommendation_row(
     status_callback: StatusCallback | None,
     force_stop_requested: StopFlag | None,
     filename_pattern: str,
+    direct_report_count: int,
 ) -> RowProcessResult:
+    direct_report_count = normalize_direct_report_count(direct_report_count)
     recommend_then_direct = truthy(row_data.get("recommend_then_direct", False))
     completed_recommend_task = completed_report_task(log_dir, row_data, TASK_TYPE_RECOMMEND)
+    completed_final_targets = (
+        split_country_values(completed_recommend_task.get("final_target_countries", ""))
+        if completed_recommend_task is not None
+        else []
+    )
     can_skip_recommend = completed_recommend_task is not None and (
-        not recommend_then_direct or str(completed_recommend_task.get("final_target_countries", "")).strip()
+        not recommend_then_direct or len(completed_final_targets) >= direct_report_count
     )
 
     if can_skip_recommend:
@@ -1080,18 +1095,18 @@ def process_recommendation_row(
 
     if can_skip_recommend:
         recommended = split_country_values(row_data.get("recommended_countries", ""))
-        final_targets = split_country_values(row_data.get("final_target_countries", ""))[:MAX_DIRECT_COUNTRIES]
+        final_targets = split_country_values(row_data.get("final_target_countries", ""))[:direct_report_count]
     else:
         try:
-            existing_targets = split_country_values(row_data.get("target_country", ""))[:MAX_DIRECT_COUNTRIES]
-            needed_count = MAX_DIRECT_COUNTRIES - len(existing_targets)
+            existing_targets = split_country_values(row_data.get("target_country", ""))[:direct_report_count]
+            needed_count = direct_report_count - len(existing_targets)
             recommended = extract_recommended_countries(page, row_data, needed_count)
-            final_targets = (existing_targets + recommended)[:MAX_DIRECT_COUNTRIES]
+            final_targets = (existing_targets + recommended)[:direct_report_count]
             row_data["recommended_countries"] = join_country_values(recommended)
             row_data["final_target_countries"] = join_country_values(final_targets)
 
-            if len(final_targets) < MAX_DIRECT_COUNTRIES:
-                raise ValueError("추천 결과에서 직접 분석 대상 국가 2개를 확보하지 못했습니다.")
+            if len(final_targets) < direct_report_count:
+                raise ValueError(f"추천 결과에서 직접 분석 대상 국가 {direct_report_count}개를 확보하지 못했습니다.")
             update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_SUCCESS, saved_file=recommendation_report)
         except Exception as exc:
             update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_FAILED, saved_file=recommendation_report, error_message=str(exc))
@@ -1392,6 +1407,14 @@ def normalize_parallel_sessions(parallel_sessions: int) -> int:
     return max(1, min(MAX_PARALLEL_SESSIONS, count))
 
 
+def normalize_direct_report_count(direct_report_count: int) -> int:
+    try:
+        count = int(direct_report_count)
+    except (TypeError, ValueError):
+        return DEFAULT_DIRECT_REPORT_COUNT
+    return max(1, min(MAX_DIRECT_REPORT_COUNT, count))
+
+
 def normalize_row_retry_count(row_retry_count: int) -> int:
     try:
         count = int(row_retry_count)
@@ -1483,6 +1506,7 @@ def run_parallel_automation(
     wait_for_manual_login: bool,
     parallel_sessions: int,
     row_retry_count: int,
+    direct_report_count: int,
     auto_retry_enabled: RetryFlag | None,
     filename_pattern: str,
     status_callback: StatusCallback | None,
@@ -1493,6 +1517,7 @@ def run_parallel_automation(
     total = len(rows)
     worker_count = min(normalize_parallel_sessions(parallel_sessions), total)
     row_retry_count = normalize_row_retry_count(row_retry_count)
+    direct_report_count = normalize_direct_report_count(direct_report_count)
     row_queue: queue.Queue[tuple[int, dict[str, Any], int]] = queue.Queue()
     for row_number, row_data in enumerate(rows, start=1):
         row_queue.put((row_number, row_data, 0))
@@ -1698,6 +1723,7 @@ def run_parallel_automation(
                             ),
                             force_stop_requested=force_stop_requested,
                             filename_pattern=filename_pattern,
+                            direct_report_count=direct_report_count,
                         )
                         saved_files_text = row_result.saved_files_text()
                         with file_lock:
@@ -1838,6 +1864,7 @@ def run_automation(
     force_stop_requested: StopFlag | None = None,
     parallel_sessions: int = 1,
     row_retry_count: int = DEFAULT_ROW_RETRY_COUNT,
+    direct_report_count: int = DEFAULT_DIRECT_REPORT_COUNT,
     auto_retry_enabled: RetryFlag | None = None,
     filename_pattern: str = "",
     report_mode: str = REPORT_MODE_DIRECT,
@@ -1850,6 +1877,7 @@ def run_automation(
     filename_pattern = normalize_filename_pattern(filename_pattern)
     validate_filename_pattern(filename_pattern)
     report_mode = normalize_report_mode(report_mode)
+    direct_report_count = normalize_direct_report_count(direct_report_count)
 
     download_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1864,6 +1892,8 @@ def run_automation(
         else:
             row["report_mode"] = report_mode
             row["recommend_then_direct"] = bool(recommend_then_direct)
+        uses_recommend_link = row["report_mode"] == REPORT_MODE_RECOMMEND and truthy(row.get("recommend_then_direct", False))
+        row["direct_report_count"] = direct_report_count if uses_recommend_link else DEFAULT_DIRECT_REPORT_COUNT
         row["use_task_resume"] = bool(retry_failed_only)
     total = len(rows)
     row_retry_count = normalize_row_retry_count(row_retry_count)
@@ -1936,6 +1966,7 @@ def run_automation(
             wait_for_manual_login=wait_for_manual_login,
             parallel_sessions=parallel_sessions,
             row_retry_count=row_retry_count,
+            direct_report_count=direct_report_count,
             auto_retry_enabled=auto_retry_enabled,
             filename_pattern=filename_pattern,
             status_callback=status_callback,
@@ -2026,6 +2057,7 @@ def run_automation(
                         status_callback=lambda message: emit_progress(completed_count, message),
                         force_stop_requested=force_stop_requested,
                         filename_pattern=filename_pattern,
+                        direct_report_count=direct_report_count,
                     )
                     saved_files_text = row_result.saved_files_text()
                     log_success_row(row_data, saved_files_text, log_dir)
@@ -2213,6 +2245,7 @@ def build_processing_status_row(input_excel_path: str | Path, row_data: dict[str
         "report_mode": str(row_data.get("report_mode", "")),
         SOURCE_FILE_COLUMN: str(row_data.get(SOURCE_FILE_COLUMN, "") or Path(input_excel_path)),
         "recommend_then_direct": str(row_data.get("recommend_then_direct", "")),
+        "direct_report_count": str(row_data.get("direct_report_count", "")),
         "row_index": str(row_data.get("row_index", "")),
         "hs_code": str(row_data.get("hs_code", "")),
         "product_name": str(row_data.get("product_name", "")),
@@ -2319,6 +2352,7 @@ def build_report_task_row(row_data: dict[str, Any], task_type: str, country: str
         SOURCE_FILE_COLUMN: str(row_data.get(SOURCE_FILE_COLUMN, "")),
         "report_mode": str(row_data.get("report_mode", "")),
         "recommend_then_direct": str(row_data.get("recommend_then_direct", "")),
+        "direct_report_count": str(row_data.get("direct_report_count", "")),
         "row_index": str(row_data.get("row_index", "")),
         "hs_code": str(row_data.get("hs_code", "")),
         "product_name": str(row_data.get("product_name", "")),
