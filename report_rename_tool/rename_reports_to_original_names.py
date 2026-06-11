@@ -7,6 +7,17 @@ from pathlib import Path
 OLD_REPORT_PATTERN = re.compile(
     r"^(?P<row_index>\d+)_(?P<hs_code>[^_]+)_(?P<product_name>.+)_(?P<target_country>[^_]+)_(?P<timestamp>\d{8}_\d{6})(?P<suffix>\.[^.]+)$"
 )
+FILENAME_FORBIDDEN_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
+FILENAME_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f]")
+WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+MAX_SAFE_FILENAME_LENGTH = 240
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -95,7 +106,22 @@ def unique_target_path(path: Path, reserved_targets: set[Path]) -> Path:
 
 
 def sanitize_report_filename(filename: str) -> str:
-    return re.sub(r'[\\/:*?"<>|]', "_", filename).strip()
+    safe = FILENAME_FORBIDDEN_CHARS_RE.sub("_", str(filename or ""))
+    safe = FILENAME_CONTROL_CHARS_RE.sub("_", safe)
+    safe = safe.strip().strip(".")
+    if not safe:
+        return "report.pdf"
+
+    suffix = Path(safe).suffix
+    stem = Path(safe).stem if suffix else safe
+    if stem.upper() in WINDOWS_RESERVED_FILENAMES:
+        stem = f"_{stem}"
+
+    max_stem_length = max(1, MAX_SAFE_FILENAME_LENGTH - len(suffix))
+    if len(stem) > max_stem_length:
+        stem = stem[:max_stem_length].rstrip(" .") or "report"
+
+    return f"{stem}{suffix}"
 
 
 if __name__ == "__main__":

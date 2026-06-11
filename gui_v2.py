@@ -13,7 +13,12 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from automation import FILENAME_PATTERN_TOKEN_LABELS, render_filename_pattern, run_automation
+from automation import (
+    FILENAME_PATTERN_TOKEN_LABELS,
+    render_filename_pattern,
+    run_automation,
+    split_country_values,
+)
 from config import (
     APP_CREDITS,
     BASE_DIR,
@@ -48,6 +53,43 @@ COLORS = {
     "danger_hover": "#b91c1c",
     "warning": "#b45309",
 }
+
+_STATUS_BADGE_COLORS = {
+    "처리 중": ("#dbeafe", COLORS["primary"], "#3b82f6"),
+    "처리완료": ("#dcfce7", COLORS["success"], "#65a30d"),
+    "처리실패": ("#fee2e2", COLORS["danger"], "#ef4444"),
+    "자동 재시도 대기": ("#fef3c7", COLORS["warning"], "#d97706"),
+    "처리 안됨": ("#e5e7eb", COLORS["muted"], "#9ca3af"),
+}
+
+_TABLE_COLUMN_LAYOUT = [
+    (0, 44, 0),    # #
+    (1, 220, 6),   # 상품명
+    (2, 96, 2),    # HS코드
+    (3, 120, 2),   # 대상국
+    (4, 64, 1),    # 세션
+    (5, 126, 2),   # 상태
+    (6, 82, 1),    # 경과
+    (7, 72, 1),    # 파일
+]
+_RESIZE_HANDLE_COLOR = "#d8e0eb"
+_RESIZE_HANDLE_HOVER_COLOR = COLORS["primary"]
+_RESIZE_HANDLE_BG_HOVER = "#f3f7ff"
+
+# 자식(세부 작업) 행 펼침/접힘 애니메이션 관련 상수
+_CHILD_ROW_HEIGHT = 30          # _make_child_row 의 height 와 일치해야 함
+_CHILD_ROW_GAP = 1              # 자식 행 pack pady 하단 간격
+_CHILD_ANIM_DURATION = 0.26     # 펼침/접힘 애니메이션 길이(초)
+_CHILD_ANIM_INTERVAL = 12       # 애니메이션 프레임 간격(ms, 약 60~80fps)
+
+# 진행 테이블: 헤더는 스크롤 영역 밖이라 본문(CTkScrollableFrame) 내부보다
+# 세로 스크롤바 폭만큼 넓다. 스크롤바가 보일 때만 헤더 우측에 이만큼 거터를 둬서
+# 열 정렬을 맞춘다(스크롤바가 숨겨지면 본문이 넓어지므로 거터도 0이 되어야 함).
+_SCROLLBAR_GUTTER = 16
+_SCROLLBAR_CHECK_INTERVAL = 250  # 스크롤바 필요 여부 점검 주기(ms) — 로그창과 동일한 방식
+# 데이터가 좌측 정렬인 열(상품명). 헤더 글자도 같은 정렬로 맞춰야 어긋나 보이지 않음.
+# 대상국(3)은 HS코드처럼 헤더/데이터 모두 중앙 정렬이므로 포함하지 않는다.
+_TABLE_LEFT_ALIGNED_COLUMNS = {1}
 
 DEFAULT_FILENAME_PATTERN = ""
 DEFAULT_FILENAME_PARTS: list[dict[str, str]] = []
@@ -271,10 +313,10 @@ class KotraReportAppV2(ctk.CTk):
         self.status = tk.StringVar(value="대기 중")
         self.progress = tk.StringVar(value="0 / 0")
         self.progress_percent = tk.DoubleVar(value=0)
-        self.success = tk.StringVar(value="0건")
-        self.failed = tk.StringVar(value="0건")
-        self.current_row = tk.StringVar(value="0")
-        self.total_rows = tk.StringVar(value="0")
+        self.total_count = tk.StringVar(value="0")
+        self.running_count = tk.StringVar(value="0")
+        self.completed_count = tk.StringVar(value="0")
+        self.failed_count = tk.StringVar(value="0")
 
         self.start_button: ctk.CTkButton | None = None
         self.retry_failed_button: ctk.CTkButton | None = None
@@ -283,6 +325,27 @@ class KotraReportAppV2(ctk.CTk):
         self.status_badge: ctk.CTkLabel | None = None
         self.progress_bar: ctk.CTkProgressBar | None = None
         self.log_text: ctk.CTkTextbox | None = None
+        self._board_tabs: dict[str, ctk.CTkButton] = {}
+        self._board_tab_lines: dict[str, ctk.CTkFrame] = {}
+        self._board_tab_frames: dict[str, ctk.CTkFrame] = {}
+        self._board_content: ctk.CTkFrame | None = None
+        self._progress_body: ctk.CTkScrollableFrame | None = None
+        self._progress_header: ctk.CTkFrame | None = None
+        self._header_gutter = 0  # 스크롤바가 보일 때만 _SCROLLBAR_GUTTER 로 바뀜
+        self._progress_empty_label: ctk.CTkLabel | None = None
+        self._progress_row_widgets: dict[str, dict] = {}
+        self._row_start_times: dict[str, float] = {}
+        self._running_keys: set[str] = set()
+        self._row_status_by_key: dict[str, str] = {}
+        self._child_keys_by_parent: dict[str, list[str]] = {}
+        self._child_status_by_key: dict[str, str] = {}
+        self._child_expanded_parents: set[str] = set()
+        self._child_anim_jobs: dict[str, str] = {}
+        self._table_column_widths = {column: minsize for column, minsize, _weight in _TABLE_COLUMN_LAYOUT}
+        self._table_column_min_widths = {column: max(36, int(minsize * 0.55)) for column, minsize, _weight in _TABLE_COLUMN_LAYOUT}
+        self._table_frames: list[ctk.CTkFrame] = []
+        self._column_resize_state: dict[str, int] | None = None
+        self._page_frame: ctk.CTkScrollableFrame | None = None
         self.background_switch: ctk.CTkSwitch | None = None
         self.use_session_switch: ctk.CTkSwitch | None = None
         self.auto_retry_switch: ctk.CTkSwitch | None = None
@@ -325,6 +388,8 @@ class KotraReportAppV2(ctk.CTk):
         self.filename_text_part.trace_add("write", lambda *_args: self._refresh_filename_text_placeholder())
         self._sync_filename_pattern_from_parts()
         self.after(200, self._poll_events)
+        self.after(1000, self._tick_elapsed)
+        self.after(_SCROLLBAR_CHECK_INTERVAL, self._update_progress_scrollbar)
 
     def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
         self.tooltips.append(HoverTooltip(widget, text))
@@ -336,13 +401,13 @@ class KotraReportAppV2(ctk.CTk):
         page = ctk.CTkScrollableFrame(self, fg_color="transparent")
         page.grid(row=0, column=0, sticky="nsew", padx=24, pady=22)
         page.grid_columnconfigure(0, weight=1)
+        self._page_frame = page
 
         self._build_header(page)
         self._build_file_panel(page)
         self._build_options_panel(page)
         self._build_action_panel(page)
-        self._build_progress_panel(page)
-        self._build_log_panel(page)
+        self._build_execution_board(page)
 
     def _build_header(self, parent: ctk.CTkFrame) -> None:
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -882,33 +947,51 @@ class KotraReportAppV2(ctk.CTk):
         self.retry_failed_button.pack(side="left", padx=(8, 0))
         self._attach_tooltip(self.retry_failed_button, "logs/failed_rows.xlsx에 남은 실패 항목만 다시 실행합니다.")
 
-    def _build_progress_panel(self, parent: ctk.CTkFrame) -> None:
-        panel = self._section(parent, 4, "진행 현황")
-        for column in range(4):
-            panel.grid_columnconfigure(column, weight=1)
+    def _build_execution_board(self, parent: ctk.CTkFrame) -> None:
+        panel = self._section(parent, 4, "실행 현황")
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(4, weight=1)
 
-        self._metric_card(panel, 0, "현재 행", self.current_row, COLORS["primary"])
-        self._metric_card(panel, 1, "전체 행", self.total_rows, COLORS["text"])
-        self._metric_card(panel, 2, "성공", self.success, COLORS["success"])
-        self._metric_card(panel, 3, "실패", self.failed, COLORS["danger"])
+        metrics = ctk.CTkFrame(panel, fg_color="transparent")
+        metrics.grid(row=0, column=0, sticky="ew")
+        for column in range(4):
+            metrics.grid_columnconfigure(column, weight=1)
+
+        self._metric_card(metrics, 0, "전체", self.total_count, COLORS["text"])
+        self._metric_card(metrics, 1, "처리중", self.running_count, COLORS["primary"])
+        self._metric_card(metrics, 2, "완료", self.completed_count, COLORS["success"])
+        self._metric_card(metrics, 3, "실패", self.failed_count, COLORS["danger"])
 
         progress_row = ctk.CTkFrame(panel, fg_color="transparent")
-        progress_row.grid(row=1, column=0, columnspan=4, sticky="ew", padx=18, pady=(6, 14))
+        progress_row.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 14))
         progress_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(progress_row, textvariable=self.progress, text_color=COLORS["muted"], width=64).grid(
-            row=0, column=0, sticky="w"
-        )
+        ctk.CTkLabel(
+            progress_row,
+            text="전체 진행률",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            width=88,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
         self.progress_bar = ctk.CTkProgressBar(
             progress_row,
             height=10,
             fg_color="#e2e8f0",
             progress_color=COLORS["primary"],
         )
-        self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(12, 0))
+        self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(10, 12))
         self.progress_bar.set(0)
+        ctk.CTkLabel(
+            progress_row,
+            textvariable=self.progress,
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            width=92,
+            anchor="e",
+        ).grid(row=0, column=2, sticky="e")
 
         status_box = ctk.CTkFrame(panel, fg_color=COLORS["surface_alt"], corner_radius=8)
-        status_box.grid(row=2, column=0, columnspan=4, sticky="ew", padx=18, pady=(0, 18))
+        status_box.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 16))
         status_box.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             status_box,
@@ -920,28 +1003,11 @@ class KotraReportAppV2(ctk.CTk):
             row=0, column=1, sticky="ew", padx=(0, 14), pady=12
         )
 
-    def _build_log_panel(self, parent: ctk.CTkFrame) -> None:
-        panel = self._section(parent, 5, "실행 로그")
-        panel.grid_columnconfigure(0, weight=1)
-        panel.grid_rowconfigure(0, weight=1)
-
-        self.log_text = ctk.CTkTextbox(
-            panel,
-            height=190,
-            fg_color="#0f172a",
-            text_color="#dbeafe",
-            border_width=0,
-            corner_radius=8,
-            font=ctk.CTkFont(family="Consolas", size=13),
-            wrap="word",
-        )
-        self.log_text.grid(row=0, column=0, sticky="nsew", padx=18, pady=(18, 10))
-        self.log_text.configure(state="disabled")
-        self._configure_log_tags()
-        self._bind_log_mousewheel()
+        self._build_board_tabs(panel)
+        self._show_board_tab("progress")
 
         log_actions = ctk.CTkFrame(panel, fg_color="transparent")
-        log_actions.grid(row=1, column=0, sticky="e", padx=18, pady=(0, 18))
+        log_actions.grid(row=5, column=0, sticky="e", padx=18, pady=(10, 18))
         open_log_button = ctk.CTkButton(
             log_actions,
             text="로그 폴더 열기",
@@ -956,6 +1022,635 @@ class KotraReportAppV2(ctk.CTk):
         )
         open_log_button.pack(side="right")
         self._attach_tooltip(open_log_button, "실행 기록, 실패 목록, 처리 상태 파일이 저장된 로그 폴더를 엽니다.")
+
+    def _build_board_tabs(self, parent: ctk.CTkFrame) -> None:
+        tab_bar = ctk.CTkFrame(parent, fg_color="transparent")
+        tab_bar.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 0))
+
+        self._board_tabs = {}
+        self._board_tab_lines = {}
+        for index, (key, label) in enumerate((("progress", "진행 현황"), ("log", "로그"))):
+            tab_item = ctk.CTkFrame(tab_bar, fg_color="transparent")
+            tab_item.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 4, 0))
+            button = ctk.CTkButton(
+                tab_item,
+                text=label,
+                width=96,
+                height=34,
+                corner_radius=0,
+                border_width=0,
+                fg_color="transparent",
+                hover_color=COLORS["surface_alt"],
+                text_color=COLORS["muted"],
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=lambda selected=key: self._show_board_tab(selected),
+            )
+            button.grid(row=0, column=0, sticky="ew")
+            line = ctk.CTkFrame(tab_item, fg_color="transparent", height=3)
+            line.grid(row=1, column=0, sticky="ew", padx=8)
+            line.grid_propagate(False)
+            self._board_tabs[key] = button
+            self._board_tab_lines[key] = line
+
+        content = ctk.CTkFrame(parent, fg_color=COLORS["surface"], border_width=1, border_color=COLORS["border"], corner_radius=8)
+        content.grid(row=4, column=0, sticky="nsew", padx=18, pady=(0, 0))
+        content.configure(height=330)
+        content.grid_propagate(False)
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(0, weight=1)
+        self._board_content = content
+
+        progress_tab = ctk.CTkFrame(content, fg_color=COLORS["surface"])
+        progress_tab.grid_columnconfigure(0, weight=1)
+        progress_tab.grid_rowconfigure(1, weight=1)
+        self._build_progress_tree(progress_tab)
+
+        log_tab = ctk.CTkFrame(content, fg_color=COLORS["surface"])
+        log_tab.grid_columnconfigure(0, weight=1)
+        log_tab.grid_rowconfigure(0, weight=1)
+        self.log_text = ctk.CTkTextbox(
+            log_tab,
+            height=220,
+            fg_color="#0f172a",
+            text_color="#dbeafe",
+            border_width=0,
+            corner_radius=8,
+            font=ctk.CTkFont(family="Consolas", size=13),
+            wrap="word",
+        )
+        self.log_text.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.log_text.configure(state="disabled")
+        self._configure_log_tags()
+        self._bind_log_mousewheel()
+
+        self._board_tab_frames = {"progress": progress_tab, "log": log_tab}
+
+    def _show_board_tab(self, selected: str) -> None:
+        for key, frame in self._board_tab_frames.items():
+            if key == selected:
+                frame.grid(row=0, column=0, sticky="nsew")
+            else:
+                frame.grid_forget()
+
+        for key, button in self._board_tabs.items():
+            is_selected = key == selected
+            button.configure(
+                fg_color="transparent",
+                hover_color=COLORS["surface_alt"],
+                text_color=COLORS["text"] if is_selected else COLORS["muted"],
+                border_width=0 if is_selected else 0,
+            )
+            line = self._board_tab_lines.get(key)
+            if line is not None:
+                line.configure(fg_color=COLORS["text"] if is_selected else "transparent")
+
+    def _configure_table_cols(self, frame: ctk.CTkFrame) -> None:
+        if frame not in self._table_frames:
+            self._table_frames.append(frame)
+        self._apply_table_column_layout()
+
+    def _apply_table_column_layout(self) -> None:
+        live_frames = []
+        gutter_col = len(_TABLE_COLUMN_LAYOUT)  # 실제 열(0~7) 뒤의 거터 열
+        for frame in self._table_frames:
+            try:
+                if not frame.winfo_exists():
+                    continue
+                for column, _minsize, weight in _TABLE_COLUMN_LAYOUT:
+                    frame.grid_columnconfigure(
+                        column,
+                        minsize=self._table_column_widths.get(column, _minsize),
+                        weight=weight,
+                    )
+                # 헤더는 스크롤 영역 밖이라, 스크롤바가 보일 때 본문 내부보다 그 폭만큼 넓어진다.
+                # 그때만 헤더 우측에 거터를 둬서 가중치가 분배되는 실제 열 영역을 본문과
+                # 동일하게 맞춘다(스크롤바가 숨겨지면 _header_gutter 가 0 이라 거터도 사라짐).
+                is_header = frame is self._progress_header
+                frame.grid_columnconfigure(
+                    gutter_col,
+                    minsize=(self._header_gutter if is_header else 0),
+                    weight=0,
+                )
+                live_frames.append(frame)
+            except tk.TclError:
+                continue
+        self._table_frames = live_frames
+
+    def _set_header_gutter(self, gutter: int) -> None:
+        """스크롤바 표시 여부가 바뀔 때만 헤더 거터를 갱신하고 열 레이아웃을 다시 적용한다."""
+        if self._header_gutter == gutter:
+            return
+        self._header_gutter = gutter
+        self._apply_table_column_layout()
+
+    def _update_progress_scrollbar(self) -> None:
+        """진행 테이블 스크롤바를 로그창처럼 '필요할 때만' 표시한다.
+
+        CTkScrollableFrame 은 스크롤바를 항상 띄우므로, CTkTextbox 와 같은 방식으로
+        주기적으로 내용이 넘치는지(yview != 0~1) 확인해 grid / grid_forget 한다.
+        스크롤바가 사라지면 본문이 그 폭만큼 넓어지므로 헤더 거터도 함께 맞춘다.
+        """
+        body = self._progress_body
+        if body is not None:
+            canvas = getattr(body, "_parent_canvas", None)
+            scrollbar = getattr(body, "_scrollbar", None)
+            if canvas is not None and scrollbar is not None:
+                try:
+                    needed = canvas.yview() != (0.0, 1.0)
+                    mapped = bool(scrollbar.winfo_ismapped())
+                    if needed and not mapped:
+                        scrollbar.grid(row=1, column=1, sticky="nsew", pady=0)
+                        self._set_header_gutter(_SCROLLBAR_GUTTER)
+                    elif not needed and mapped:
+                        scrollbar.grid_forget()
+                        self._set_header_gutter(0)
+                except tk.TclError:
+                    pass
+        self.after(_SCROLLBAR_CHECK_INTERVAL, self._update_progress_scrollbar)
+
+    def _build_table_header_cell(self, parent: ctk.CTkFrame, column: int, text: str) -> None:
+        cell = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+        cell.grid(row=0, column=column, sticky="nsew", padx=(4 if column == 0 else 0, 0), pady=0)
+        cell.grid_columnconfigure(0, weight=1)
+        cell.grid_rowconfigure(0, weight=1)
+
+        left_aligned = column in _TABLE_LEFT_ALIGNED_COLUMNS
+        ctk.CTkLabel(
+            cell,
+            text=text,
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w" if left_aligned else "center",
+            # 우측 16px 는 리사이즈 핸들 자리. 중앙 정렬 열은 좌우 패딩을 대칭(16,16)으로
+            # 둬야 헤더 글자 중심이 데이터 글자 중심(=컬럼 중앙)과 정확히 일치한다.
+        ).grid(row=0, column=0, sticky="nsew", padx=((4, 16) if left_aligned else (16, 16)), pady=4)
+
+        if column >= len(_TABLE_COLUMN_LAYOUT) - 1:
+            return
+
+        handle = tk.Frame(
+            cell,
+            cursor="sb_h_double_arrow",
+            bg=COLORS["surface_alt"],
+            bd=0,
+            highlightthickness=0,
+        )
+        handle.place(relx=1.0, rely=0, relheight=1.0, width=16, anchor="ne")
+        grip = tk.Frame(
+            handle,
+            width=1,
+            bg=_RESIZE_HANDLE_COLOR,
+            bd=0,
+            highlightthickness=0,
+            cursor="sb_h_double_arrow",
+        )
+        grip.place(relx=0.5, rely=0.22, relheight=0.56, anchor="n")
+
+        def highlight(_event: tk.Event | None = None) -> None:
+            handle.configure(bg=_RESIZE_HANDLE_BG_HOVER)
+            grip.configure(bg=_RESIZE_HANDLE_HOVER_COLOR, width=2)
+
+        def unhighlight(_event: tk.Event | None = None) -> None:
+            if self._column_resize_state is None:
+                handle.configure(bg=COLORS["surface_alt"])
+                grip.configure(bg=_RESIZE_HANDLE_COLOR, width=1)
+
+        def end_resize(event: tk.Event) -> str:
+            result = self._end_column_resize(event)
+            unhighlight()
+            return result
+
+        for widget in (handle, grip):
+            widget.bind("<Enter>", highlight)
+            widget.bind("<Leave>", unhighlight)
+            widget.bind("<ButtonPress-1>", lambda event, col=column: self._start_column_resize(event, col))
+            widget.bind("<B1-Motion>", self._drag_column_resize)
+            widget.bind("<ButtonRelease-1>", end_resize)
+        self._attach_tooltip(handle, "드래그해서 컬럼 폭을 조정합니다.")
+
+    def _start_column_resize(self, event: tk.Event, column: int) -> str:
+        next_column = column + 1
+        self._column_resize_state = {
+            "column": column,
+            "next_column": next_column,
+            "x_root": int(event.x_root),
+            "start_width": int(self._table_column_widths.get(column, 0)),
+            "next_start_width": int(self._table_column_widths.get(next_column, 0)),
+        }
+        return "break"
+
+    def _drag_column_resize(self, event: tk.Event) -> str:
+        state = self._column_resize_state
+        if state is None:
+            return "break"
+
+        column = state["column"]
+        next_column = state["next_column"]
+        start_width = state["start_width"]
+        next_start_width = state["next_start_width"]
+        dx = int(event.x_root) - state["x_root"]
+
+        min_width = self._table_column_min_widths.get(column, 36)
+        next_min_width = self._table_column_min_widths.get(next_column, 36)
+        applied_dx = max(min_width - start_width, min(dx, next_start_width - next_min_width))
+
+        self._table_column_widths[column] = start_width + applied_dx
+        self._table_column_widths[next_column] = next_start_width - applied_dx
+        self._apply_table_column_layout()
+        return "break"
+
+    def _end_column_resize(self, _event: tk.Event) -> str:
+        self._column_resize_state = None
+        return "break"
+
+    def _build_progress_tree(self, parent: ctk.CTkFrame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(parent, fg_color=COLORS["surface_alt"], corner_radius=0, height=36)
+        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
+        header.grid_propagate(False)
+        self._progress_header = header  # _apply_table_column_layout 에서 헤더만 거터 처리
+        self._configure_table_cols(header)
+        for col, text in [
+            (0, "#"),
+            (1, "상품명"),
+            (2, "HS코드"),
+            (3, "대상국"),
+            (4, "세션"),
+            (5, "상태"),
+            (6, "경과"),
+            (7, "파일"),
+        ]:
+            self._build_table_header_cell(header, col, text)
+
+        body = ctk.CTkScrollableFrame(
+            parent, fg_color=COLORS["surface_alt"], corner_radius=0, border_width=0,
+        )
+        body.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        body.grid_columnconfigure(0, weight=1)
+        self._progress_body = body
+        self._setup_progress_scroll_isolation(body)
+        self._show_progress_empty_state()
+
+    def _setup_progress_scroll_isolation(self, body: ctk.CTkScrollableFrame) -> None:
+        """진행 테이블 내부 스크롤만 이 영역에서 처리한다."""
+        body_canvas = getattr(body, "_parent_canvas", None)
+        if body_canvas is None:
+            return
+
+        def _on_scroll(event: tk.Event) -> str:
+            if getattr(event, "num", None) == 4:
+                body_canvas.yview_scroll(-3, "units")
+            elif getattr(event, "num", None) == 5:
+                body_canvas.yview_scroll(3, "units")
+            elif not event.delta:
+                return "break"
+            elif sys.platform == "darwin":
+                body_canvas.yview_scroll(-int(event.delta), "units")
+            else:
+                body_canvas.yview_scroll(-int(event.delta / 120) * 3, "units")
+            return "break"
+
+        for widget in (body, body_canvas):
+            widget.bind("<MouseWheel>", _on_scroll, add="+")
+            widget.bind("<Button-4>", _on_scroll, add="+")
+            widget.bind("<Button-5>", _on_scroll, add="+")
+
+    def _make_data_row(self, parent: ctk.CTkScrollableFrame, row_index: int,
+                       product: str, hs: str, country: str, mode_lbl: str) -> dict:
+        frame = ctk.CTkFrame(parent, fg_color=COLORS["surface"], corner_radius=4, height=38)
+        frame.pack(fill="x", expand=False, pady=(0, 1), padx=0)
+        frame.pack_propagate(False)
+        self._configure_table_cols(frame)
+
+        ctk.CTkLabel(frame, text=str(row_index), text_color=COLORS["muted"],
+                     font=ctk.CTkFont(size=12), anchor="center",
+                     ).grid(row=0, column=0, sticky="ew", padx=(8, 4))
+        product_box = ctk.CTkFrame(frame, fg_color="transparent")
+        product_box.grid(row=0, column=1, sticky="ew", padx=(4, 4))
+        product_box.grid_columnconfigure(0, weight=1)
+        product_box.grid_columnconfigure(1, weight=0)
+        ctk.CTkLabel(product_box, text=product, text_color=COLORS["text"],
+                     font=ctk.CTkFont(size=13), anchor="w",
+                     ).grid(row=0, column=0, sticky="ew", columnspan=2)
+        ctk.CTkLabel(product_box, text=mode_lbl, text_color=COLORS["muted"],
+                     font=ctk.CTkFont(size=10), anchor="w",
+                     ).grid(row=1, column=0, sticky="ew", pady=(0, 1))
+        child_toggle = ctk.CTkButton(
+            product_box,
+            text="",
+            width=0,
+            height=20,
+            fg_color="transparent",
+            hover_color=COLORS["surface_alt"],
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=lambda: None,
+        )
+        ctk.CTkLabel(frame, text=hs, text_color=COLORS["muted"],
+                     font=ctk.CTkFont(family="Consolas", size=12), anchor="center",
+                     ).grid(row=0, column=2, sticky="ew", padx=(4, 4))
+        ctk.CTkLabel(frame, text=country, text_color=COLORS["muted"],
+                     font=ctk.CTkFont(size=12), anchor="center",
+                     ).grid(row=0, column=3, sticky="ew", padx=(4, 4))
+        session_lbl = ctk.CTkLabel(frame, text="—", text_color=COLORS["muted"],
+                                   font=ctk.CTkFont(size=12), anchor="center")
+        session_lbl.grid(row=0, column=4, sticky="ew", padx=(4, 4))
+        status_lbl = self._status_pill(frame, "처리 안됨")
+        status_lbl.grid(row=0, column=5, sticky="", padx=(4, 4))
+        elapsed_lbl = ctk.CTkLabel(frame, text="—", text_color=COLORS["muted"],
+                                   font=ctk.CTkFont(size=12), anchor="center")
+        elapsed_lbl.grid(row=0, column=6, sticky="ew", padx=(4, 4))
+        file_button = ctk.CTkButton(
+            frame,
+            text="—",
+            width=46,
+            height=26,
+            fg_color="transparent",
+            hover_color=COLORS["surface_alt"],
+            border_width=0,
+            text_color=COLORS["muted"],
+            state="disabled",
+            command=lambda: None,
+        )
+        file_button.grid(row=0, column=7, sticky="", padx=(4, 8))
+
+        children_frame = ctk.CTkFrame(parent, fg_color=COLORS["surface_alt"], corner_radius=0)
+        children_frame.grid_columnconfigure(0, weight=1)
+        # 높이를 직접 제어해 펼침/접힘 애니메이션을 주기 위해 자동 크기 조정을 끈다.
+        children_frame.pack_propagate(False)
+        self._bind_progress_row_scroll(frame)
+
+        return {
+            "frame": frame,
+            "session_lbl": session_lbl,
+            "status_lbl": status_lbl,
+            "elapsed_lbl": elapsed_lbl,
+            "file_button": file_button,
+            "children_frame": children_frame,
+            "children_visible": False,
+            "children_height": 0,
+            "child_toggle": child_toggle,
+        }
+
+    def _make_child_row(self, parent: ctk.CTkFrame, task_label: str) -> dict:
+        frame = ctk.CTkFrame(parent, fg_color=COLORS["surface"], corner_radius=4, height=_CHILD_ROW_HEIGHT)
+        frame.pack_propagate(False)
+        self._configure_table_cols(frame)
+
+        ctk.CTkLabel(frame, text="↳", text_color=COLORS["muted"],
+                     font=ctk.CTkFont(size=11), anchor="e", width=20,
+                     ).grid(row=0, column=0, sticky="e", padx=(0, 6))
+        ctk.CTkLabel(frame, text=task_label, text_color=COLORS["muted"],
+                     font=ctk.CTkFont(size=12), anchor="w",
+                     ).grid(row=0, column=1, sticky="ew", padx=(10, 4))
+        status_lbl = self._status_pill(frame, "처리 안됨", width=108)
+        status_lbl.grid(row=0, column=5, padx=(4, 4))
+        elapsed_lbl = ctk.CTkLabel(frame, text="—", text_color=COLORS["muted"],
+                                   font=ctk.CTkFont(size=12), anchor="center")
+        elapsed_lbl.grid(row=0, column=6, sticky="ew", padx=(4, 4))
+        file_button = ctk.CTkButton(
+            frame,
+            text="—",
+            width=46,
+            height=24,
+            fg_color="transparent",
+            hover_color=COLORS["surface_alt"],
+            border_width=0,
+            text_color=COLORS["muted"],
+            state="disabled",
+            command=lambda: None,
+        )
+        file_button.grid(row=0, column=7, sticky="", padx=(4, 8))
+        self._bind_progress_row_scroll(frame)
+
+        return {"frame": frame, "status_lbl": status_lbl, "elapsed_lbl": elapsed_lbl, "file_button": file_button}
+
+    def _status_pill(self, parent: ctk.CTkFrame, status: str, width: int = 104) -> ctk.CTkLabel:
+        fg, text, _dot = _STATUS_BADGE_COLORS.get(status, _STATUS_BADGE_COLORS["처리 안됨"])
+        return ctk.CTkLabel(
+            parent,
+            text=f"● {status}",
+            width=width,
+            height=24,
+            fg_color=fg,
+            text_color=text,
+            corner_radius=12,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="center",
+        )
+
+    def _configure_status_pill(self, label: ctk.CTkLabel, status: str) -> None:
+        fg, text, _dot = _STATUS_BADGE_COLORS.get(status, _STATUS_BADGE_COLORS["처리 안됨"])
+        label.configure(text=f"● {status}", fg_color=fg, text_color=text)
+
+    def _show_progress_empty_state(self) -> None:
+        body = self._progress_body
+        if body is None:
+            return
+        for widget in body.winfo_children():
+            widget.destroy()
+        self._progress_empty_label = ctk.CTkLabel(
+            body,
+            text="아직 실행된 항목이 없습니다.",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=160,
+        )
+        self._progress_empty_label.pack(fill="x", expand=True, pady=34)
+
+    def _bind_progress_row_scroll(self, frame: ctk.CTkFrame) -> None:
+        body_canvas = getattr(self._progress_body, "_parent_canvas", None)
+        if body_canvas is None:
+            return
+
+        def _on_scroll(event: tk.Event) -> str:
+            if getattr(event, "num", None) == 4:
+                body_canvas.yview_scroll(-3, "units")
+            elif getattr(event, "num", None) == 5:
+                body_canvas.yview_scroll(3, "units")
+            elif not event.delta:
+                return "break"
+            elif sys.platform == "darwin":
+                body_canvas.yview_scroll(-int(event.delta), "units")
+            else:
+                body_canvas.yview_scroll(-int(event.delta / 120) * 3, "units")
+            return "break"
+
+        def bind_recursive(widget: tk.Widget) -> None:
+            widget.bind("<MouseWheel>", _on_scroll, add="+")
+            widget.bind("<Button-4>", _on_scroll, add="+")
+            widget.bind("<Button-5>", _on_scroll, add="+")
+            for child in widget.winfo_children():
+                bind_recursive(child)
+
+        bind_recursive(frame)
+
+    def _update_summary_counts(self) -> None:
+        running = sum(1 for status in self._row_status_by_key.values() if status == "처리 중")
+        self.running_count.set(str(running))
+
+    def _task_sort_key(self, child_key: str) -> int:
+        # 추천 보고서만 맨 위로 올리고, 나머지(투자 보고서)는 동일 그룹(1)이라
+        # sorted 의 안정 정렬 특성상 _child_keys_by_parent 에 등록된 순서
+        # (= 실제 처리 순서)를 그대로 유지한다.
+        task_type = child_key.split(":")[-2] if ":" in child_key else ""
+        return 0 if task_type == "recommend" else 1
+
+    def _toggle_child_tasks(self, parent_key: str) -> None:
+        if parent_key in self._child_expanded_parents:
+            self._child_expanded_parents.remove(parent_key)
+        else:
+            self._child_expanded_parents.add(parent_key)
+        self._refresh_child_visibility(parent_key)
+
+    def _refresh_child_visibility(self, parent_key: str) -> None:
+        parent_widgets = self._progress_row_widgets.get(parent_key)
+        if parent_widgets is None:
+            return
+        child_keys = sorted(self._child_keys_by_parent.get(parent_key, []), key=self._task_sort_key)
+        if not child_keys:
+            return
+
+        expanded = parent_key in self._child_expanded_parents
+        visible_keys = [
+            key
+            for key in child_keys
+            if expanded or self._child_status_by_key.get(key) == "처리 중"
+        ]
+
+        toggle = parent_widgets.get("child_toggle")
+        if toggle is not None:
+            toggle.configure(
+                text=("접기" if expanded else f"작업 {len(child_keys)}개"),
+                command=lambda key=parent_key: self._toggle_child_tasks(key),
+                width=68 if expanded else 82,
+            )
+            toggle.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(0, 1))
+
+        # 보여줄 자식 행들을 먼저 컨테이너 안에 배치(또는 제거)한다.
+        # children_frame 은 pack_propagate(False) 이라 높이로 잘려 보이고,
+        # 아래 _animate_children 가 높이를 0↔목표값으로 부드럽게 움직인다.
+        for key in child_keys:
+            widgets = self._progress_row_widgets.get(key)
+            if widgets is None:
+                continue
+            frame = widgets["frame"]
+            if key in visible_keys:
+                # 자식 행도 부모와 동일하게 풀 너비로 둔다. 들여쓰기(padx)를 주면
+                # 프레임이 좁아져 상태/경과/파일 열이 부모와 어긋나므로,
+                # 계층 표시는 ↳ 글리프와 라벨 들여쓰기로만 표현한다.
+                frame.pack(fill="x", expand=False, pady=(0, _CHILD_ROW_GAP), padx=0)
+            else:
+                frame.pack_forget()
+
+        children_frame = parent_widgets["children_frame"]
+        target_height = len(visible_keys) * (_CHILD_ROW_HEIGHT + _CHILD_ROW_GAP)
+
+        if visible_keys:
+            if not parent_widgets.get("children_visible"):
+                children_frame.configure(height=1)
+                parent_widgets["children_height"] = 1
+                children_frame.pack(fill="x", expand=False, after=parent_widgets["frame"])
+                parent_widgets["children_visible"] = True
+            self._animate_children(parent_key, target_height)
+        elif parent_widgets.get("children_visible"):
+            self._animate_children(parent_key, 0, on_done=children_frame.pack_forget)
+            parent_widgets["children_visible"] = False
+
+    def _animate_children(self, parent_key: str, target_height: int, on_done=None) -> None:
+        """children_frame 의 높이를 현재값에서 target_height 로 ease-out 으로 보간한다."""
+        parent_widgets = self._progress_row_widgets.get(parent_key)
+        if parent_widgets is None:
+            return
+        frame = parent_widgets.get("children_frame")
+        if frame is None:
+            return
+
+        # 진행 중이던 같은 부모의 애니메이션이 있으면 취소(겹침 방지).
+        pending = self._child_anim_jobs.pop(parent_key, None)
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+
+        start_height = int(parent_widgets.get("children_height", 0))
+        if start_height == target_height:
+            try:
+                frame.configure(height=max(1, target_height))
+            except Exception:
+                pass
+            if on_done is not None:
+                on_done()
+            return
+
+        start_ts = datetime.now().timestamp()
+
+        def _step() -> None:
+            t = (datetime.now().timestamp() - start_ts) / _CHILD_ANIM_DURATION
+            if t >= 1.0:
+                t = 1.0
+            # ease-in-out cubic: 시작과 끝 모두 천천히, 중간이 빠른 부드러운 곡선
+            if t < 0.5:
+                eased = 4 * t * t * t
+            else:
+                eased = 1 - ((-2 * t + 2) ** 3) / 2
+            height = int(round(start_height + (target_height - start_height) * eased))
+            parent_widgets["children_height"] = height
+            try:
+                frame.configure(height=max(1, height))
+            except Exception:
+                pass
+            if t >= 1.0:
+                self._child_anim_jobs.pop(parent_key, None)
+                if on_done is not None:
+                    try:
+                        on_done()
+                    except Exception:
+                        pass
+            else:
+                self._child_anim_jobs[parent_key] = self.after(_CHILD_ANIM_INTERVAL, _step)
+
+        _step()
+
+    def _cancel_child_animations(self) -> None:
+        """진행 중인 펼침/접힘 애니메이션 콜백을 모두 취소한다(테이블 재구성 시)."""
+        for job in list(self._child_anim_jobs.values()):
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._child_anim_jobs.clear()
+
+    def _update_file_button(self, widgets: dict, saved_files: list[str]) -> None:
+        button = widgets.get("file_button")
+        if button is None:
+            return
+        paths = [Path(path) for path in saved_files if str(path).strip()]
+        if not paths:
+            button.configure(
+                text="—",
+                state="disabled",
+                fg_color="transparent",
+                border_width=0,
+                text_color=COLORS["muted"],
+                command=lambda: None,
+            )
+            return
+
+        target = paths[0] if len(paths) == 1 else paths[0].parent
+        button.configure(
+            text="열기",
+            state="normal",
+            fg_color=COLORS["surface"],
+            hover_color="#edf2f7",
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            command=lambda path=target: self._open_path(path),
+        )
 
     def _section(self, parent: ctk.CTkFrame, row: int, title: str) -> ctk.CTkFrame:
         wrapper = ctk.CTkFrame(parent, fg_color=COLORS["surface"], border_width=1, border_color=COLORS["border"], corner_radius=8)
@@ -1682,12 +2377,21 @@ class KotraReportAppV2(ctk.CTk):
 
         self.stop_requested = False
         self.force_stop_requested = False
-        self.progress.set("0 / 0")
+        self.progress.set("0 / 0 완료")
         self.progress_percent.set(0)
-        self.current_row.set("0")
-        self.total_rows.set("0")
-        self.success.set("0건")
-        self.failed.set("0건")
+        self.total_count.set("0")
+        self.running_count.set("0")
+        self.completed_count.set("0")
+        self.failed_count.set("0")
+        self._row_status_by_key.clear()
+        self._progress_row_widgets.clear()
+        self._row_start_times.clear()
+        self._running_keys.clear()
+        self._child_keys_by_parent.clear()
+        self._child_status_by_key.clear()
+        self._child_expanded_parents.clear()
+        self._cancel_child_animations()
+        self._show_progress_empty_state()
         self.status.set("시작 준비 중")
         self._set_status_badge("running")
         self._set_progress(0)
@@ -1846,6 +2550,10 @@ class KotraReportAppV2(ctk.CTk):
                 progress_callback=lambda data: self.events.put(("progress", data)),
                 stop_requested=lambda: self.stop_requested,
                 force_stop_requested=lambda: self.force_stop_requested,
+                row_status_callback=lambda data: self.events.put(("row_status", data)),
+                # 워커 스레드가 row dict 를 계속 수정하므로, GUI 가 읽을 스냅샷을 복사해 전달한다.
+                rows_ready_callback=lambda rows: self.events.put(("rows_init", [dict(row) for row in rows])),
+                task_status_callback=lambda data: self.events.put(("task_status", data)),
             )
             self.events.put(("done", result))
         except Exception as exc:
@@ -1862,6 +2570,12 @@ class KotraReportAppV2(ctk.CTk):
                     self._handle_progress(payload)
                 elif event == "done":
                     self._handle_done(payload)
+                elif event == "rows_init":
+                    self._init_progress_table(payload)
+                elif event == "row_status":
+                    self._handle_row_status(payload)
+                elif event == "task_status":
+                    self._handle_task_status(payload)
                 elif event == "error":
                     self.status.set("오류 발생")
                     self._set_status_badge("danger")
@@ -1880,17 +2594,211 @@ class KotraReportAppV2(ctk.CTk):
         failed = int(data.get("failed", 0) or 0)
         percent = (current / total * 100) if total else 0
 
-        self.current_row.set(str(current))
-        self.total_rows.set(str(total))
-        self.progress.set(f"{current} / {total}")
+        self.total_count.set(str(total))
+        self.completed_count.set(str(success))
+        self.failed_count.set(str(failed))
+        self.progress.set(f"{current} / {total} 완료")
         self.progress_percent.set(percent)
         self._set_progress(percent)
-        self.success.set(f"{success}건")
-        self.failed.set(f"{failed}건")
+        self._update_summary_counts()
         if data.get("status"):
             status = str(data["status"])
             self.status.set(status)
             self._append_log(status, self._log_tag(status))
+
+    def _mode_label(self, report_mode: str, recommend_then_direct: bool) -> str:
+        if report_mode == "recommend" and recommend_then_direct:
+            return "추천→직접"
+        if report_mode == "recommend":
+            return "추천"
+        return "직접"
+
+    def _split_countries(self, value: object, limit: int | None = None) -> list[str]:
+        # automation 의 분리 규칙(구분자/중복 제거/정규화)을 그대로 사용해
+        # 사전 생성하는 자식 작업 목록이 실제 처리 목록과 항상 일치하게 한다.
+        countries = split_country_values(value)
+        if limit is not None:
+            return countries[:limit]
+        return countries
+
+    def _direct_report_count_for_row(self, row: dict) -> int:
+        try:
+            return max(1, int(row.get("direct_report_count", 1) or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    def _init_queued_child_tasks(self, parent_key: str, row: dict) -> None:
+        report_mode = str(row.get("report_mode", ""))
+        recommend_then_direct = bool(row.get("recommend_then_direct", False))
+        if report_mode == "direct":
+            countries = self._split_countries(row.get("target_country", ""), self._direct_report_count_for_row(row))
+        elif report_mode == "recommend" and recommend_then_direct:
+            self._upsert_child_task(parent_key, "recommend", "", "처리 안됨", 0)
+            countries = self._split_countries(
+                row.get("final_target_countries", "") or row.get("target_country", ""),
+                self._direct_report_count_for_row(row),
+            )
+        else:
+            countries = []
+
+        for country in countries:
+            self._upsert_child_task(parent_key, "direct", country, "처리 안됨", 0)
+
+    def _elapsed_str(self, key: str, ts: float) -> str:
+        if key not in self._row_start_times:
+            return "—"
+        elapsed = int(ts - self._row_start_times[key])
+        m, s = divmod(elapsed, 60)
+        return f"{m}m {s:02d}s" if m else f"{s}s"
+
+    def _tick_elapsed(self) -> None:
+        now = datetime.now().timestamp()
+        for key in list(self._running_keys):
+            widgets = self._progress_row_widgets.get(key)
+            start = self._row_start_times.get(key)
+            if widgets is None or start is None:
+                continue
+            elapsed = int(now - start)
+            m, s = divmod(elapsed, 60)
+            elapsed_str = f"{m}m {s:02d}s" if m else f"{s}s"
+            try:
+                widgets["elapsed_lbl"].configure(text=elapsed_str)
+            except Exception:
+                pass
+        self.after(1000, self._tick_elapsed)
+
+    def _init_progress_table(self, payload: object) -> None:
+        body = self._progress_body
+        if body is None:
+            return
+        rows = payload if isinstance(payload, list) else []
+        for w in body.winfo_children():
+            w.destroy()
+        self._progress_row_widgets.clear()
+        self._row_start_times.clear()
+        self._running_keys.clear()
+        self._row_status_by_key.clear()
+        self._child_keys_by_parent.clear()
+        self._child_status_by_key.clear()
+        self._child_expanded_parents.clear()
+        self._cancel_child_animations()
+        if not rows:
+            self._show_progress_empty_state()
+            return
+        for row in rows:
+            row_index = int(row.get("row_index", 0))
+            key = str(row.get("ui_key", "") or f"row:{row_index}")
+            mode_label = self._mode_label(
+                str(row.get("report_mode", "")),
+                bool(row.get("recommend_then_direct", False)),
+            )
+            widgets = self._make_data_row(
+                body,
+                row_index=row_index,
+                product=str(row.get("product_name", ""))[:35],
+                hs=str(row.get("hs_code", "")),
+                # 희망 국가 없음(플레이스홀더 '-' 입력 등)은 빈 값으로 정규화되므로 '—' 로 표시
+                country=str(row.get("target_country", ""))[:20] or "—",
+                mode_lbl=mode_label,
+            )
+            self._progress_row_widgets[key] = widgets
+            self._row_status_by_key[key] = "처리 안됨"
+            self._init_queued_child_tasks(key, row)
+        try:
+            canvas = getattr(body, "_parent_canvas", None)
+            if canvas is not None:
+                canvas.yview_moveto(0)
+        except Exception:
+            pass
+        self._update_summary_counts()
+
+    def _handle_row_status(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        row_index = int(data.get("row_index", 0))
+        status = str(data.get("status", ""))
+        session_id = int(data.get("session_id", 1))
+        ts = float(data.get("ts", 0))
+        key = str(data.get("ui_key", "") or f"row:{row_index}")
+        widgets = self._progress_row_widgets.get(key)
+        if widgets is None:
+            return
+        if status == "처리 중":
+            self._running_keys.add(key)
+            self._row_start_times[key] = ts
+            elapsed_str = "0s"
+        else:
+            self._running_keys.discard(key)
+            elapsed_str = self._elapsed_str(key, ts)
+        self._row_status_by_key[key] = status
+        saved_files = data.get("saved_files", [])
+        if not isinstance(saved_files, list):
+            saved_files = []
+        try:
+            self._configure_status_pill(widgets["status_lbl"], status)
+            # session_id=0 은 세션에 배정되지 못한 채 종료된 행(병렬 세션 중단 등).
+            widgets["session_lbl"].configure(text=f"S{session_id}" if session_id > 0 else "—")
+            widgets["elapsed_lbl"].configure(text=elapsed_str)
+            self._update_file_button(widgets, [str(path) for path in saved_files])
+        except Exception:
+            pass
+        self._update_summary_counts()
+
+    def _handle_task_status(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        row_index = int(data.get("row_index", 0))
+        task_type = str(data.get("task_type", ""))
+        country = str(data.get("country", ""))
+        status = str(data.get("status", ""))
+        ts = float(data.get("ts", 0))
+        saved_files = data.get("saved_files", [])
+        if not isinstance(saved_files, list):
+            saved_files = []
+        parent_key = str(data.get("ui_key", "") or f"row:{row_index}")
+        self._upsert_child_task(parent_key, task_type, country, status, ts, [str(path) for path in saved_files])
+
+    def _upsert_child_task(
+        self,
+        parent_key: str,
+        task_type: str,
+        country: str,
+        status: str,
+        ts: float,
+        saved_files: list[str] | None = None,
+    ) -> None:
+        parent_widgets = self._progress_row_widgets.get(parent_key)
+        if parent_widgets is None:
+            return
+        child_label = "추천 보고서" if task_type == "recommend" else f"투자 보고서 - {country}"
+        child_key = f"{parent_key}:{task_type}:{country}"
+        if status == "처리 중":
+            self._row_start_times[child_key] = ts
+            self._running_keys.add(child_key)
+            elapsed_str = "0s"
+        else:
+            self._running_keys.discard(child_key)
+            if status == "처리 안됨":
+                # 자동 재시도 시 자식 작업이 '처리 안됨'으로 재초기화된다.
+                # 이전 시도의 시작 시각이 남아 있으면 경과시간이 잘못 표시되므로 비운다.
+                self._row_start_times.pop(child_key, None)
+                elapsed_str = "—"
+            else:
+                elapsed_str = self._elapsed_str(child_key, ts)
+        child_widgets = self._progress_row_widgets.get(child_key)
+        if child_widgets is None:
+            child_widgets = self._make_child_row(parent_widgets["children_frame"], child_label)
+            self._progress_row_widgets[child_key] = child_widgets
+        if child_key not in self._child_keys_by_parent.setdefault(parent_key, []):
+            self._child_keys_by_parent[parent_key].append(child_key)
+        self._child_status_by_key[child_key] = status
+        if status == "처리 중":
+            self._child_expanded_parents.add(parent_key)
+        try:
+            self._configure_status_pill(child_widgets["status_lbl"], status)
+            child_widgets["elapsed_lbl"].configure(text=elapsed_str)
+            self._update_file_button(child_widgets, saved_files or [])
+        except Exception:
+            pass
+        self._refresh_child_visibility(parent_key)
 
     def _handle_done(self, payload: object) -> None:
         result = payload if isinstance(payload, dict) else {}

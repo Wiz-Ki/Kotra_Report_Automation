@@ -19,6 +19,7 @@ from automation import (
     report_tasks_path,
     read_failed_rows,
     read_input_excel,
+    resolve_download_save_path,
     render_filename_pattern,
     split_country_values,
     update_report_task_status,
@@ -52,6 +53,36 @@ class FilenamePatternTest(unittest.TestCase):
         )
 
         self.assertEqual(filename, "미국_일본_화장품_기초.pdf")
+
+    def test_sanitizes_default_site_filename_for_windows(self) -> None:
+        class FakeDownload:
+            suggested_filename = "미국/일본:보고서.pdf"
+
+        with TemporaryDirectory() as tmp_dir:
+            path = resolve_download_save_path(FakeDownload(), Path(tmp_dir))
+
+        self.assertEqual(path.name, "미국_일본_보고서.pdf")
+
+    def test_avoids_windows_reserved_filename(self) -> None:
+        filename = render_filename_pattern(
+            "{product_name}",
+            {"product_name": "CON"},
+            suggested_filename="report.pdf",
+            now=datetime(2026, 6, 9, 14, 30, 12),
+        )
+
+        self.assertEqual(filename, "_CON.pdf")
+
+    def test_truncates_long_filename_for_windows(self) -> None:
+        filename = render_filename_pattern(
+            "{product_name}",
+            {"product_name": "가" * 300},
+            suggested_filename="report.pdf",
+            now=datetime(2026, 6, 9, 14, 30, 12),
+        )
+
+        self.assertLessEqual(len(filename), 244)
+        self.assertTrue(filename.endswith(".pdf"))
 
     def test_keeps_single_pdf_suffix(self) -> None:
         filename = render_filename_pattern(

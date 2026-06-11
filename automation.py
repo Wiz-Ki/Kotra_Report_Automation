@@ -60,6 +60,8 @@ SELECTORS = _load_app_selectors()
 
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[dict[str, Any]], None]
+RowStatusCallback = Callable[[dict[str, Any]], None]
+TaskStatusCallback = Callable[[dict[str, Any]], None]
 StopFlag = Callable[[], bool]
 RetryFlag = Callable[[], bool]
 
@@ -152,6 +154,16 @@ FILENAME_PATTERN_TOKEN_LABELS = [
 FILENAME_PATTERN_TOKENS = {token for _label, token in FILENAME_PATTERN_TOKEN_LABELS}
 FILENAME_PATTERN_TOKEN_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
 FILENAME_FORBIDDEN_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
+FILENAME_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f]")
+WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+MAX_SAFE_FILENAME_LENGTH = 240
 
 
 class GenerationError(RuntimeError):
@@ -777,7 +789,7 @@ def resolve_download_save_path(
     if normalize_filename_pattern(filename_pattern):
         filename = render_filename_pattern(filename_pattern, row_data or {}, suggested_filename=suggested_filename)
     else:
-        filename = suggested_filename
+        filename = sanitize_report_filename(suggested_filename) or "report.pdf"
     return unique_file_path(save_path / filename)
 
 
@@ -850,7 +862,21 @@ def render_filename_pattern(
 
 def sanitize_report_filename(filename: Any) -> str:
     safe = FILENAME_FORBIDDEN_CHARS_RE.sub("_", str(filename or ""))
-    return safe.strip().strip(".")
+    safe = FILENAME_CONTROL_CHARS_RE.sub("_", safe)
+    safe = safe.strip().strip(".")
+    if not safe:
+        return ""
+
+    suffix = Path(safe).suffix
+    stem = Path(safe).stem if suffix else safe
+    if stem.upper() in WINDOWS_RESERVED_FILENAMES:
+        stem = f"_{stem}"
+
+    max_stem_length = max(1, MAX_SAFE_FILENAME_LENGTH - len(suffix))
+    if len(stem) > max_stem_length:
+        stem = stem[:max_stem_length].rstrip(" .") or "report"
+
+    return f"{stem}{suffix}"
 
 
 def unique_file_path(path: Path) -> Path:
@@ -955,6 +981,7 @@ def process_row(
     force_stop_requested: StopFlag | None = None,
     filename_pattern: str = "",
     direct_report_count: int = DEFAULT_DIRECT_REPORT_COUNT,
+    task_status_callback: TaskStatusCallback | None = None,
 ) -> RowProcessResult:
     report_mode = normalize_report_mode(row_data.get("report_mode", REPORT_MODE_DIRECT))
     direct_report_count = normalize_direct_report_count(row_data.get("direct_report_count", direct_report_count))
@@ -971,6 +998,7 @@ def process_row(
             force_stop_requested,
             filename_pattern,
             direct_report_count,
+            task_status_callback,
         )
 
     return process_direct_row(
@@ -985,6 +1013,7 @@ def process_row(
         force_stop_requested,
         filename_pattern,
         direct_report_count,
+        task_status_callback,
     )
 
 
@@ -1000,11 +1029,28 @@ def process_direct_row(
     force_stop_requested: StopFlag | None,
     filename_pattern: str,
     direct_report_count: int,
+    task_status_callback: TaskStatusCallback | None = None,
 ) -> RowProcessResult:
     direct_report_count = normalize_direct_report_count(direct_report_count)
     target_countries = split_country_values(row_data.get("target_country", ""))[:direct_report_count]
     if not target_countries:
         raise ValueError("희망 진출 국가가 없어 수출시장 분석 보고서를 생성할 수 없습니다.")
+
+    def emit_task_status(country: str, status: str, saved_files: list[Path] | None = None) -> None:
+        if task_status_callback:
+            row_index = int(row_data.get("row_index", 0))
+            task_status_callback({
+                "ui_key": str(row_data.get("ui_key", "") or f"row:{row_index}"),
+                "row_index": row_index,
+                "task_type": TASK_TYPE_DIRECT,
+                "country": country,
+                "status": status,
+                "saved_files": [str(path) for path in (saved_files or [])],
+                "ts": time.time(),
+            })
+
+    for country in target_countries:
+        emit_task_status(country, STATUS_PENDING)
 
     direct_report_files: list[Path] = []
     for index, country in enumerate(target_countries):
@@ -1015,11 +1061,13 @@ def process_direct_row(
             row_data["direct_report_files"] = join_path_values(direct_report_files)
             if status_callback:
                 status_callback(f"이미 완료된 수출시장 분석 보고서를 건너뜁니다: {country}")
+            emit_task_status(country, STATUS_SUCCESS, [saved_file])
             continue
 
         if index > 0:
             reset_for_next_row(page)
         update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_RUNNING)
+        emit_task_status(country, STATUS_RUNNING)
         try:
             saved_direct_report = process_direct_country_report(
                 page,
@@ -1036,10 +1084,12 @@ def process_direct_row(
             )
         except Exception as exc:
             update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
+            emit_task_status(country, STATUS_FAILED)
             raise
         direct_report_files.append(saved_direct_report)
         row_data["direct_report_files"] = join_path_values(direct_report_files)
         update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_SUCCESS, saved_file=saved_direct_report)
+        emit_task_status(country, STATUS_SUCCESS, [saved_direct_report])
 
     row_data["final_target_countries"] = join_country_values(target_countries)
     return RowProcessResult(
@@ -1061,9 +1111,24 @@ def process_recommendation_row(
     force_stop_requested: StopFlag | None,
     filename_pattern: str,
     direct_report_count: int,
+    task_status_callback: TaskStatusCallback | None = None,
 ) -> RowProcessResult:
     direct_report_count = normalize_direct_report_count(direct_report_count)
     recommend_then_direct = truthy(row_data.get("recommend_then_direct", False))
+
+    def emit_task_status(task_type: str, country: str, status: str, saved_files: list[Path] | None = None) -> None:
+        if task_status_callback and recommend_then_direct:
+            row_index = int(row_data.get("row_index", 0))
+            task_status_callback({
+                "ui_key": str(row_data.get("ui_key", "") or f"row:{row_index}"),
+                "row_index": row_index,
+                "task_type": task_type,
+                "country": country,
+                "status": status,
+                "saved_files": [str(path) for path in (saved_files or [])],
+                "ts": time.time(),
+            })
+
     completed_recommend_task = completed_report_task(log_dir, row_data, TASK_TYPE_RECOMMEND)
     completed_final_targets = (
         split_country_values(completed_recommend_task.get("final_target_countries", ""))
@@ -1081,8 +1146,10 @@ def process_recommendation_row(
         row_data["final_target_countries"] = str(completed_recommend_task.get("final_target_countries", ""))
         if status_callback:
             status_callback("이미 완료된 유망 시장 추천 보고서를 건너뜁니다.")
+        emit_task_status(TASK_TYPE_RECOMMEND, "", STATUS_SUCCESS, [recommendation_report])
     else:
         update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_RUNNING)
+        emit_task_status(TASK_TYPE_RECOMMEND, "", STATUS_RUNNING)
         try:
             recommendation_report = process_recommendation_report(
                 page,
@@ -1099,6 +1166,7 @@ def process_recommendation_row(
             row_data["recommendation_report_file"] = str(recommendation_report)
         except Exception as exc:
             update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_FAILED, error_message=str(exc))
+            emit_task_status(TASK_TYPE_RECOMMEND, "", STATUS_FAILED)
             raise
 
     if not recommend_then_direct:
@@ -1124,9 +1192,14 @@ def process_recommendation_row(
             if len(final_targets) < direct_report_count:
                 raise ValueError(f"추천 결과에서 직접 분석 대상 국가 {direct_report_count}개를 확보하지 못했습니다.")
             update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_SUCCESS, saved_file=recommendation_report)
+            emit_task_status(TASK_TYPE_RECOMMEND, "", STATUS_SUCCESS, [recommendation_report])
         except Exception as exc:
             update_report_task_status(log_dir, row_data, TASK_TYPE_RECOMMEND, "", STATUS_FAILED, saved_file=recommendation_report, error_message=str(exc))
+            emit_task_status(TASK_TYPE_RECOMMEND, "", STATUS_FAILED)
             raise
+
+    for country in final_targets:
+        emit_task_status(TASK_TYPE_DIRECT, country, STATUS_PENDING)
 
     direct_report_files: list[Path] = []
     for country in final_targets:
@@ -1137,10 +1210,12 @@ def process_recommendation_row(
             row_data["direct_report_files"] = join_path_values(direct_report_files)
             if status_callback:
                 status_callback(f"이미 완료된 수출시장 분석 보고서를 건너뜁니다: {country}")
+            emit_task_status(TASK_TYPE_DIRECT, country, STATUS_SUCCESS, [saved_file])
             continue
 
         reset_for_next_row(page)
         update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_RUNNING)
+        emit_task_status(TASK_TYPE_DIRECT, country, STATUS_RUNNING)
         try:
             saved_direct_report = process_direct_country_report(
                 page,
@@ -1157,10 +1232,12 @@ def process_recommendation_row(
             )
         except Exception as exc:
             update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
+            emit_task_status(TASK_TYPE_DIRECT, country, STATUS_FAILED)
             raise
         direct_report_files.append(saved_direct_report)
         row_data["direct_report_files"] = join_path_values(direct_report_files)
         update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_SUCCESS, saved_file=saved_direct_report)
+        emit_task_status(TASK_TYPE_DIRECT, country, STATUS_SUCCESS, [saved_direct_report])
 
     return RowProcessResult(
         saved_files=[recommendation_report, *direct_report_files],
@@ -1309,6 +1386,10 @@ def truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "o", "on", "사용", "사용함", "켜짐"}
 
 
+# 대상국/제외국가 칸에 '-' 처럼 대시만 적은 값은 '희망 국가 없음' 의도의 플레이스홀더로 본다.
+COUNTRY_NONE_PLACEHOLDER_RE = re.compile(r"[-–—―－]+")
+
+
 def split_country_values(value: Any) -> list[str]:
     text = str(value or "").strip()
     if not text:
@@ -1328,7 +1409,10 @@ def split_country_values(value: Any) -> list[str]:
 def normalize_single_country(value: Any) -> str:
     text = str(value or "").strip()
     text = re.sub(r"\s+", " ", text)
-    return text.strip(" ,")
+    text = text.strip(" ,")
+    if COUNTRY_NONE_PLACEHOLDER_RE.fullmatch(text):
+        return ""
+    return text
 
 
 def join_country_values(countries: list[str]) -> str:
@@ -1529,6 +1613,8 @@ def run_parallel_automation(
     progress_callback: ProgressCallback | None,
     stop_requested: StopFlag | None,
     force_stop_requested: StopFlag | None,
+    row_status_callback: RowStatusCallback | None = None,
+    task_status_callback: TaskStatusCallback | None = None,
 ) -> dict[str, Any]:
     total = len(rows)
     worker_count = min(normalize_parallel_sessions(parallel_sessions), total)
@@ -1650,7 +1736,32 @@ def run_parallel_automation(
         with storage_state_lock:
             active_workers -= 1
 
+    def emit_row_status_for(
+        session_id: int,
+        row_data: dict[str, Any],
+        status: str,
+        saved_files: list[Path] | None = None,
+    ) -> None:
+        if row_status_callback:
+            row_index = int(row_data.get("row_index", 0))
+            row_status_callback({
+                "ui_key": str(row_data.get("ui_key", "") or f"row:{row_index}"),
+                "row_index": row_index,
+                "status": status,
+                "session_id": session_id,
+                "product_name": str(row_data.get("product_name", "")),
+                "hs_code": str(row_data.get("hs_code", "")),
+                "target_country": str(row_data.get("target_country", "")),
+                "report_mode": str(row_data.get("report_mode", "")),
+                "recommend_then_direct": bool(row_data.get("recommend_then_direct", False)),
+                "saved_files": [str(path) for path in (saved_files or [])],
+                "ts": time.time(),
+            })
+
     def run_worker(session_id: int) -> None:
+        def emit_row_status(row_data: dict[str, Any], status: str, saved_files: list[Path] | None = None) -> None:
+            emit_row_status_for(session_id, row_data, status, saved_files)
+
         with sync_playwright() as playwright:
             start_delay = (session_id - 1) * PARALLEL_SESSION_START_DELAY_SECONDS
             if start_delay:
@@ -1722,6 +1833,7 @@ def run_parallel_automation(
                         row_data["use_task_resume"] = bool(retry_failed_only or row_attempt > 0)
                         with file_lock:
                             update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
+                        emit_row_status(row_data, STATUS_RUNNING)
 
                         row_result = process_row(
                             page,
@@ -1740,11 +1852,13 @@ def run_parallel_automation(
                             force_stop_requested=force_stop_requested,
                             filename_pattern=filename_pattern,
                             direct_report_count=direct_report_count,
+                            task_status_callback=task_status_callback,
                         )
                         saved_files_text = row_result.saved_files_text()
                         with file_lock:
                             log_success_row(row_data, saved_files_text, log_dir)
                             update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_files_text)
+                        emit_row_status(row_data, STATUS_SUCCESS, row_result.saved_files)
                         mark_result(current_index, True)
                         clear_wait_status(session_id)
                         emit_status(f"{prefix} 성공: {row_result.saved_file_names_text()}")
@@ -1755,6 +1869,7 @@ def run_parallel_automation(
                         with file_lock:
                             log_failed_row(row_data, error_message, log_dir)
                             update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                        emit_row_status(row_data, STATUS_FAILED)
                         mark_result(current_index, False)
                         emit_status(f"{prefix} 처리실패 기록 후 강제종료합니다: {error_message}")
                         break
@@ -1779,6 +1894,7 @@ def run_parallel_automation(
                             next_attempt = row_attempt + 1
                             with file_lock:
                                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_RETRY_PENDING, error_message=error_message)
+                            emit_row_status(row_data, STATUS_RETRY_PENDING)
                             next_retry_item = (current_index, row_data, next_attempt)
                             mark_retry_pending_failure(current_index)
                             emit_status(f"{prefix} 실패: {message}")
@@ -1788,6 +1904,7 @@ def run_parallel_automation(
                             with file_lock:
                                 log_failed_row(row_data, error_message, log_dir)
                                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                            emit_row_status(row_data, STATUS_FAILED)
                             mark_result(current_index, False)
                             emit_status(f"{prefix} 최종 실패: {message}")
 
@@ -1842,6 +1959,8 @@ def run_parallel_automation(
                 row_data = rows[row_number - 1]
                 log_failed_row(row_data, error_message, log_dir)
                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                # 대시보드에도 실패를 반영한다(세션 없이 종료된 행이므로 session_id=0).
+                emit_row_status_for(0, row_data, STATUS_FAILED)
                 mark_result(row_number, False)
         emit_status(f"병렬 세션 중단으로 미처리 {len(uncompleted_numbers)}건을 실패로 기록했습니다.")
 
@@ -1885,6 +2004,9 @@ def run_automation(
     filename_pattern: str = "",
     report_mode: str = REPORT_MODE_DIRECT,
     recommend_then_direct: bool = False,
+    row_status_callback: RowStatusCallback | None = None,
+    rows_ready_callback: Callable[[list[dict[str, Any]]], None] | None = None,
+    task_status_callback: TaskStatusCallback | None = None,
 ) -> dict[str, Any]:
     input_excel_path = Path(input_excel_path)
     download_dir = Path(download_dir)
@@ -1899,7 +2021,8 @@ def run_automation(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     rows = read_failed_rows(log_dir) if retry_failed_only else read_input_excel(input_excel_path)
-    for row in rows:
+    for index, row in enumerate(rows, start=1):
+        row["ui_key"] = f"row:{index}"
         row[SOURCE_FILE_COLUMN] = str(row.get(SOURCE_FILE_COLUMN, "") or input_excel_path)
         if retry_failed_only:
             row["report_mode"] = normalize_report_mode(row.get("report_mode", report_mode))
@@ -1911,6 +2034,8 @@ def run_automation(
         uses_recommend_link = row["report_mode"] == REPORT_MODE_RECOMMEND and truthy(row.get("recommend_then_direct", False))
         row["direct_report_count"] = direct_report_count if uses_recommend_link else DEFAULT_DIRECT_REPORT_COUNT
         row["use_task_resume"] = bool(retry_failed_only)
+    if rows_ready_callback:
+        rows_ready_callback(rows)
     total = len(rows)
     row_retry_count = normalize_row_retry_count(row_retry_count)
     success_count = 0
@@ -1952,6 +2077,23 @@ def run_automation(
             failed_count = max(0, failed_count - 1)
         return True
 
+    def emit_row_status(row_data: dict[str, Any], status: str, saved_files: list[Path] | None = None) -> None:
+        if row_status_callback:
+            row_index = int(row_data.get("row_index", 0))
+            row_status_callback({
+                "ui_key": str(row_data.get("ui_key", "") or f"row:{row_index}"),
+                "row_index": row_index,
+                "status": status,
+                "session_id": 1,
+                "product_name": str(row_data.get("product_name", "")),
+                "hs_code": str(row_data.get("hs_code", "")),
+                "target_country": str(row_data.get("target_country", "")),
+                "report_mode": str(row_data.get("report_mode", "")),
+                "recommend_then_direct": bool(row_data.get("recommend_then_direct", False)),
+                "saved_files": [str(path) for path in (saved_files or [])],
+                "ts": time.time(),
+            })
+
     if retry_failed_only and total == 0:
         emit_status("재시도할 실패 행이 없습니다.")
         emit_progress(0, "완료")
@@ -1989,6 +2131,8 @@ def run_automation(
             progress_callback=progress_callback,
             stop_requested=stop_requested,
             force_stop_requested=force_stop_requested,
+            row_status_callback=row_status_callback,
+            task_status_callback=task_status_callback,
         )
 
     with sync_playwright() as playwright:
@@ -2060,6 +2204,7 @@ def run_automation(
                 clear_diagnostics(diagnostic_events)
                 row_data["use_task_resume"] = bool(retry_failed_only or row_attempt > 0)
                 update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
+                emit_row_status(row_data, STATUS_RUNNING)
 
                 try:
                     row_result = process_row(
@@ -2074,6 +2219,7 @@ def run_automation(
                         force_stop_requested=force_stop_requested,
                         filename_pattern=filename_pattern,
                         direct_report_count=direct_report_count,
+                        task_status_callback=task_status_callback,
                     )
                     saved_files_text = row_result.saved_files_text()
                     log_success_row(row_data, saved_files_text, log_dir)
@@ -2081,6 +2227,7 @@ def run_automation(
                     success_count += 1
                     completed_count += 1
                     update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_files_text)
+                    emit_row_status(row_data, STATUS_SUCCESS, row_result.saved_files)
                     emit_status(f"[{row_label}] 성공: {row_result.saved_file_names_text()}")
 
                 except AutomationAborted as exc:
@@ -2091,6 +2238,7 @@ def run_automation(
                     completed_count += 1
                     log_failed_row(row_data, error_message, log_dir)
                     update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                    emit_row_status(row_data, STATUS_FAILED)
                     emit_status(f"[{row_label}] 처리실패 기록 후 강제종료합니다: {error_message}")
                     break
 
@@ -2114,6 +2262,7 @@ def run_automation(
                         should_requeue = True
                         next_attempt = row_attempt + 1
                         update_processing_status(input_excel_path, log_dir, row_data, STATUS_RETRY_PENDING, error_message=error_message)
+                        emit_row_status(row_data, STATUS_RETRY_PENDING)
                         next_retry_item = (current_index, row_data, next_attempt)
                         mark_retry_pending_failure(current_index)
                         emit_status(f"[{row_label}] 실패: {message}")
@@ -2126,6 +2275,7 @@ def run_automation(
                         completed_count += 1
                         log_failed_row(row_data, error_message, log_dir)
                         update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                        emit_row_status(row_data, STATUS_FAILED)
                         emit_status(f"[{row_label}] 최종 실패: {message}")
 
                 finally:
@@ -2702,10 +2852,9 @@ def validate_hs_code(value: Any) -> None:
 
 
 def normalize_target_country(value: str) -> str:
-    value = value.replace("/", ", ")
-    value = re.sub(r"\s*,\s*", ", ", value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip(" ,")
+    # 분리/정규화 규칙을 split_country_values 와 단일화한다.
+    # '-' 같은 대시 플레이스홀더('희망 국가 없음')와 중복 국가는 여기서 제거된다.
+    return join_country_values(split_country_values(value))
 
 
 def safe_filename(text: Any) -> str:
