@@ -134,6 +134,8 @@ FILENAME_PRESETS = [
 ]
 FILENAME_PREVIEW_ROW = {
     "row_index": 1,
+    "company_name": "테스트기업 A",
+    "business_number": "0000000001",
     "hs_code": "330499",
     "product_name": "스킨케어",
     "target_country": "베트남",
@@ -621,15 +623,13 @@ class KotraReportAppV2(ctk.CTk):
         token_frame.grid(row=2, column=1, sticky="ew", padx=(8, 14), pady=(4, 8))
 
         self.filename_token_buttons = []
-        token_rows = [
-            ctk.CTkFrame(token_frame, fg_color="transparent"),
-            ctk.CTkFrame(token_frame, fg_color="transparent"),
-        ]
+        token_row_count = 3
+        token_rows = [ctk.CTkFrame(token_frame, fg_color="transparent") for _index in range(token_row_count)]
         for row_frame in token_rows:
             row_frame.pack(anchor="w", pady=(0, 4))
 
         for index, (label, token) in enumerate(FILENAME_PATTERN_TOKEN_LABELS):
-            row_frame = token_rows[0 if index < 5 else 1]
+            row_frame = token_rows[min(index // 7, token_row_count - 1)]
             button = ctk.CTkButton(
                 row_frame,
                 text=label,

@@ -17,6 +17,8 @@ SUCCESS_COLUMNS = [
     "recommend_then_direct",
     "direct_report_count",
     "row_index",
+    "company_name",
+    "business_number",
     "hs_code",
     "product_name",
     "export_scale",
@@ -37,6 +39,8 @@ FAILED_COLUMNS = [
     "recommend_then_direct",
     "direct_report_count",
     "row_index",
+    "company_name",
+    "business_number",
     "hs_code",
     "product_name",
     "export_scale",
@@ -65,6 +69,8 @@ def _append_row(excel_path: Path, row: dict[str, Any], columns: list[str]) -> No
         df = pd.DataFrame(columns=columns)
 
     df = pd.concat([df, pd.DataFrame([{column: row.get(column, "") for column in columns}])], ignore_index=True)
+    extra_columns = [column for column in df.columns if column not in columns]
+    df = df.reindex(columns=[*columns, *extra_columns], fill_value="")
     df.to_excel(excel_path, index=False)
 
 
@@ -95,6 +101,8 @@ def _base_row(row_data: dict[str, Any]) -> dict[str, Any]:
         "recommend_then_direct": row_data.get("recommend_then_direct", ""),
         "direct_report_count": row_data.get("direct_report_count", ""),
         "row_index": row_data.get("row_index", ""),
+        "company_name": row_data.get("company_name", ""),
+        "business_number": row_data.get("business_number", ""),
         "hs_code": row_data.get("hs_code", ""),
         "product_name": row_data.get("product_name", ""),
         "export_scale": row_data.get("export_scale", ""),

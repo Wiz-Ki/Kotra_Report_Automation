@@ -135,6 +135,8 @@ DEFAULT_INITIAL_FORM_WAIT_SECONDS = 10
 PARALLEL_INITIAL_FORM_WAIT_SECONDS = 15
 FILENAME_PATTERN_TOKEN_LABELS = [
     ("연번", "row_index"),
+    ("회사명", "company_name"),
+    ("사업자번호", "business_number"),
     ("HS CODE", "hs_code"),
     ("수출품명", "product_name"),
     ("희망진출국가", "target_country"),
@@ -143,12 +145,12 @@ FILENAME_PATTERN_TOKEN_LABELS = [
     ("생성날짜", "date"),
     ("생성시간", "time"),
     ("생성일시", "datetime"),
-    ("생성연도", "year"),
-    ("생성월", "month"),
-    ("생성일", "day"),
-    ("생성시", "hour"),
-    ("생성분", "minute"),
-    ("생성초", "second"),
+    ("년", "year"),
+    ("월", "month"),
+    ("일", "day"),
+    ("시", "hour"),
+    ("분", "minute"),
+    ("초", "second"),
     ("사이트 기본 파일명", "site_filename"),
 ]
 FILENAME_PATTERN_TOKENS = {token for _label, token in FILENAME_PATTERN_TOKEN_LABELS}
@@ -833,6 +835,8 @@ def render_filename_pattern(
 
     values = {
         "row_index": str(row_data.get("row_index", "")).strip(),
+        "company_name": str(row_data.get("company_name", "")).strip(),
+        "business_number": str(row_data.get("business_number", "")).strip(),
         "hs_code": str(row_data.get("hs_code", "")).strip(),
         "product_name": str(row_data.get("product_name", "")).strip(),
         "target_country": str(row_data.get("target_country", "")).strip(),
@@ -2601,6 +2605,8 @@ def read_input_excel(input_excel_path: str | Path) -> list[dict[str, Any]]:
 
         row_index_value = normalize_row_index(get_source_value(record, "row_index"), idx)
         row["row_index"] = row_index_value
+        row["company_name"] = normalize_field_value("company_name", get_source_value(record, "company_name"))
+        row["business_number"] = normalize_field_value("business_number", get_source_value(record, "business_number"))
         row["excel_row_number"] = idx + 1
         row["process_status"] = ""
         row["saved_file"] = ""
@@ -2662,6 +2668,8 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
         row["recommend_then_direct"] = str(record.get("recommend_then_direct", "")).strip()
         row[SOURCE_FILE_COLUMN] = str(record.get(SOURCE_FILE_COLUMN, "")).strip()
         row["row_index"] = int(row_index_text) if row_index_text.isdigit() else fallback_index
+        row["company_name"] = normalize_field_value("company_name", get_source_value(record, "company_name"))
+        row["business_number"] = normalize_field_value("business_number", get_source_value(record, "business_number"))
         row["recommended_countries"] = str(record.get("recommended_countries", "")).strip()
         row["final_target_countries"] = str(record.get("final_target_countries", "")).strip()
         row["recommendation_report_file"] = str(record.get("recommendation_report_file", "")).strip()

@@ -31,9 +31,11 @@ from logger import log_failed_row
 class FilenamePatternTest(unittest.TestCase):
     def test_renders_custom_filename(self) -> None:
         filename = render_filename_pattern(
-            "{row_index}_{hs_code}_{product_name}_{target_country}_{datetime}",
+            "{row_index}_{company_name}_{business_number}_{hs_code}_{product_name}_{target_country}_{datetime}",
             {
                 "row_index": 3,
+                "company_name": "테스트기업 A",
+                "business_number": "0000000001",
                 "hs_code": "330499",
                 "product_name": "스킨케어",
                 "target_country": "베트남",
@@ -42,7 +44,7 @@ class FilenamePatternTest(unittest.TestCase):
             now=datetime(2026, 6, 9, 14, 30, 12),
         )
 
-        self.assertEqual(filename, "3_330499_스킨케어_베트남_20260609_143012.pdf")
+        self.assertEqual(filename, "3_테스트기업 A_0000000001_330499_스킨케어_베트남_20260609_143012.pdf")
 
     def test_sanitizes_forbidden_filename_characters(self) -> None:
         filename = render_filename_pattern(
@@ -131,6 +133,29 @@ class FilenamePatternTest(unittest.TestCase):
         )
 
         self.assertEqual(filename, "유망 시장 추천 보고서 생성_중국, 미국_330499.pdf")
+
+    def test_reads_company_tokens_from_input_excel(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "연번(선택)": "7",
+                        "회사명(선택)": "테스트기업 A",
+                        "사업자번호(선택)": "0000000001",
+                        "수출액 규모(필수: 내수/초보/유망/성장/선도 중 1개)": "내수",
+                        "해당 품목 수출 경험(필수: O/X)": "X",
+                        "HSCODE 6단위": "330499",
+                        "수출품명(선택: 구체적으로 작성 권장)": "스킨케어",
+                        "희망진출국가(직접분석: 기본 2개, 추천연동: 설정값만큼 입력 가능)": "베트남",
+                    }
+                ]
+            ).to_excel(input_path, index=False)
+
+            [row] = read_input_excel(input_path)
+
+        self.assertEqual(row["company_name"], "테스트기업 A")
+        self.assertEqual(row["business_number"], "0000000001")
 
     def test_splits_country_values(self) -> None:
         self.assertEqual(split_country_values("베트남, 미국/일본\n베트남"), ["베트남", "미국", "일본"])

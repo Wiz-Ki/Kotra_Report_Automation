@@ -115,6 +115,8 @@ CLI에서 실행할 때는 `--filename-pattern`을 입력하면 같은 규칙으
 | 항목 | 패턴 |
 | --- | --- |
 | 연번 | `{row_index}` |
+| 회사명 | `{company_name}` |
+| 사업자번호 | `{business_number}` |
 | HS CODE | `{hs_code}` |
 | 수출품명 | `{product_name}` |
 | 희망진출국가 | `{target_country}` |
@@ -123,12 +125,12 @@ CLI에서 실행할 때는 `--filename-pattern`을 입력하면 같은 규칙으
 | 생성날짜 | `{date}` |
 | 생성시간 | `{time}` |
 | 생성일시 | `{datetime}` |
-| 생성연도 | `{year}` |
-| 생성월 | `{month}` |
-| 생성일 | `{day}` |
-| 생성시 | `{hour}` |
-| 생성분 | `{minute}` |
-| 생성초 | `{second}` |
+| 년 | `{year}` |
+| 월 | `{month}` |
+| 일 | `{day}` |
+| 시 | `{hour}` |
+| 분 | `{minute}` |
+| 초 | `{second}` |
 | 사이트 기본 파일명 | `{site_filename}` |
 
 예시 패턴:
