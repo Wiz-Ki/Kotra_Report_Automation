@@ -133,6 +133,7 @@ PARALLEL_WAIT_SUMMARY_INTERVAL_SECONDS = 30
 PARALLEL_SESSION_START_DELAY_SECONDS = 3
 DEFAULT_INITIAL_FORM_WAIT_SECONDS = 10
 PARALLEL_INITIAL_FORM_WAIT_SECONDS = 15
+GENERATION_STATUS_POLL_INTERVAL_MS = 3_000
 FILENAME_PATTERN_TOKEN_LABELS = [
     ("연번", "row_index"),
     ("회사명", "company_name"),
@@ -668,6 +669,7 @@ def wait_for_download_or_generation_error(
     retry_button = page.locator(SELECTORS["retry_button"]).first
     error_text = page.locator(SELECTORS["streaming_error_text"]).first
     generate_button = page.locator(SELECTORS["generate_button"]).first
+    new_analysis_button = page.locator(SELECTORS["new_analysis_button"]).first
 
     while datetime.now().timestamp() < deadline:
         check_force_stop(force_stop_requested)
@@ -686,11 +688,15 @@ def wait_for_download_or_generation_error(
             if status_callback:
                 status_callback("KOTRA 서버 오류 화면이 감지되었습니다.")
             return "error", retry_button
+        if now - started_at > 5 and is_visible(new_analysis_button):
+            if status_callback:
+                status_callback("분석이 중단되어 새로운 분석 시작 상태가 감지되었습니다.")
+            return "analysis_stopped", new_analysis_button
         if now - started_at > 5 and is_visible(generate_button):
             if status_callback:
                 status_callback("초기 입력 화면으로 돌아온 상태가 감지되었습니다.")
             return "returned_to_form", generate_button
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(GENERATION_STATUS_POLL_INTERVAL_MS)
 
     raise PlaywrightTimeoutError(f"다운로드 버튼이 {timeout_ms // 1000}초 안에 나타나지 않았습니다.")
 
@@ -820,6 +826,8 @@ def download_report(
         raise RuntimeError("KOTRA 보고서 생성 중 서버 스트리밍 오류가 발생했습니다.")
     if status == "returned_to_form":
         raise RuntimeError("보고서 생성 중 초기 입력 화면으로 돌아왔습니다. 서버 오류 또는 사용자의 되돌아가기 동작으로 판단됩니다.")
+    if status == "analysis_stopped":
+        raise RuntimeError("보고서 생성 중 분석이 중단되었습니다. 사용자가 분석 중단하기를 눌렀거나 사이트가 생성을 중단한 것으로 판단됩니다.")
 
     download_button.scroll_into_view_if_needed()
     wait_until_enabled(page, download_button, ELEMENT_TIMEOUT_MS)
@@ -1801,7 +1809,13 @@ def run_parallel_automation(
             emit_wait_summary(session_id, row_label, int(match.group(1)))
             return
 
-        if "PDF 저장 버튼" in message or "PDF 다운로드" in message or "오류 화면" in message or "초기 입력 화면" in message:
+        if (
+            "PDF 저장 버튼" in message
+            or "PDF 다운로드" in message
+            or "오류 화면" in message
+            or "초기 입력 화면" in message
+            or "분석이 중단" in message
+        ):
             clear_wait_status(session_id)
         emit_progress(f"{prefix} {message}")
 
