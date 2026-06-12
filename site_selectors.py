@@ -32,3 +32,14 @@ SELECTORS = {
     "reset_button": "button:has-text('초기화')",
     "new_analysis_button": "button:has-text('새로운 분석 시작하기'), a:has-text('새로운 분석 시작하기'), [role='button']:has-text('새로운 분석 시작하기')",
 }
+
+
+# 생성 대기 루프의 빠른 상태 감지는 Playwright selector 엔진 대신 브라우저 내부
+# 텍스트 매칭을 사용한다. 사이트 문구가 바뀌면 SELECTORS와 함께 이 값도 갱신한다.
+GENERATION_STATE_TEXTS = {
+    "download": ["PDF 저장", "다운로드"],
+    "retry": ["다시 시도하기"],
+    "new_analysis": ["새로운 분석 시작하기"],
+    "generate": ["보고서 생성"],
+    "streaming_error": ["Unexpected server Streaming error occurred"],
+}

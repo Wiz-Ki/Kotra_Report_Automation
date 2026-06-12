@@ -28,8 +28,8 @@ MAX_DIRECT_REPORT_COUNT = 5
 DEFAULT_PARALLEL_SESSIONS = 3
 MAX_PARALLEL_SESSIONS = 5
 
-# 사내 저사양 VM 기본값은 브라우저 UI를 띄우지 않는 백그라운드 실행입니다.
-DEFAULT_HEADLESS = True
+# 기본값은 브라우저 화면 표시 모드입니다. 필요할 때 백그라운드 실행을 켭니다.
+DEFAULT_HEADLESS = False
 
 DEFAULT_CONFIG = {
     "headless": DEFAULT_HEADLESS,

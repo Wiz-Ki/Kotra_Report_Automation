@@ -6,7 +6,7 @@ import importlib.util
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +45,7 @@ from field_mapping import (
 from logger import log_failed_row, log_success_row
 
 
-def _load_app_selectors() -> dict[str, str]:
+def _load_site_selector_module():
     selectors_path = Path(__file__).resolve().parent / "site_selectors.py"
     spec = importlib.util.spec_from_file_location("kotra_app_selectors", selectors_path)
     if spec is None or spec.loader is None:
@@ -53,10 +53,12 @@ def _load_app_selectors() -> dict[str, str]:
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.SELECTORS
+    return module
 
 
-SELECTORS = _load_app_selectors()
+_SITE_SELECTORS = _load_site_selector_module()
+SELECTORS = _SITE_SELECTORS.SELECTORS
+GENERATION_STATE_TEXTS = _SITE_SELECTORS.GENERATION_STATE_TEXTS
 
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -128,12 +130,16 @@ REPORT_TASK_COLUMNS = [
     "error_message",
     "updated_at",
 ]
-REPORT_TASKS_LOCK = threading.Lock()
+REPORT_TASKS_LOCK = threading.RLock()
+PROCESSING_STATUS_LOCK = threading.RLock()
+STATUS_WORKBOOK_FLUSH_INTERVAL_SECONDS = 30
+STATUS_WORKBOOK_FLUSH_UPDATE_COUNT = 20
 PARALLEL_WAIT_SUMMARY_INTERVAL_SECONDS = 30
 PARALLEL_SESSION_START_DELAY_SECONDS = 3
 DEFAULT_INITIAL_FORM_WAIT_SECONDS = 10
 PARALLEL_INITIAL_FORM_WAIT_SECONDS = 15
-GENERATION_STATUS_POLL_INTERVAL_MS = 3_000
+GENERATION_STATUS_POLL_INTERVAL_MS = 5_000
+GENERATION_STATE_LEGACY_CHECK_INTERVAL_LOOPS = 20
 # 보고서 생성 스트리밍 API 경로. 이 경로의 POST가 끊기면 생성이 죽은 것으로 본다.
 GENERATION_API_URL_MARKER = "/api/export-assistant/"
 # 생성 요청 중단 감지 후, 사이트가 인식 가능한 화면(초기화면/오류/중단)으로 전환되길 기다리는 유예시간.
@@ -199,6 +205,21 @@ class RowProcessResult:
 
     def saved_file_names_text(self) -> str:
         return ", ".join(path.name for path in self.saved_files)
+
+
+@dataclass
+class WorkbookStatusCache:
+    path: Path
+    columns: list[str]
+    rows_by_key: dict[tuple[str, ...], dict[str, str]]
+    ordered_keys: list[tuple[str, ...]]
+    dirty: bool = False
+    dirty_updates: int = 0
+    last_flush_at: float = field(default_factory=time.monotonic)
+
+
+PROCESSING_STATUS_CACHES: dict[Path, WorkbookStatusCache] = {}
+REPORT_TASK_CACHES: dict[Path, WorkbookStatusCache] = {}
 
 
 def launch_browser(playwright: Any, headless: bool, status_callback: StatusCallback | None = None):
@@ -649,15 +670,97 @@ def download_button_selectors() -> list[str]:
     return selectors
 
 
+def detect_generation_state(page: Page) -> dict[str, Any]:
+    """
+    보고서 생성 대기 화면의 상태를 브라우저 프로세스 안에서 한 번에 감지한다.
+
+    Playwright 전용 selector(:has-text, text=...)를 JS로 해석하지 않고,
+    대기 루프에서 필요한 의미(보이는 버튼 텍스트, 본문 오류 텍스트, 본문 지문)만
+    검사한다. 클릭이 필요한 상태가 확정된 뒤에는 기존 selector로 다시 조회한다.
+    """
+    try:
+        return page.evaluate(
+            """
+            (spec) => {
+              const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+              const includesAny = (text, tokens) => tokens.some((token) => text.includes(token));
+              const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                if (style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0 && el.getClientRects().length > 0;
+              };
+              const bodyText = normalize(document.body ? document.body.textContent : '');
+              const hasStreamingErrorText = includesAny(bodyText, spec.streaming_error);
+              let hash = 0;
+              for (let i = 0; i < bodyText.length; i += 1) {
+                hash = (hash * 31 + bodyText.charCodeAt(i)) | 0;
+              }
+              const result = {
+                download: false,
+                retry: false,
+                new_analysis: false,
+                generate: false,
+                streaming_error: hasStreamingErrorText
+                  && includesAny(normalize(document.body ? document.body.innerText : ''), spec.streaming_error),
+                signature: `${bodyText.length}:${hash}`,
+              };
+              const candidates = document.querySelectorAll("button, a, [role='button']");
+              for (const el of candidates) {
+                if (!isVisible(el)) continue;
+                const text = normalize(el.textContent);
+                if (!result.download && includesAny(text, spec.download)) result.download = true;
+                if (!result.retry && includesAny(text, spec.retry)) result.retry = true;
+                if (!result.new_analysis && includesAny(text, spec.new_analysis)) result.new_analysis = true;
+                if (!result.generate && includesAny(text, spec.generate)) result.generate = true;
+              }
+              return result;
+            }
+            """,
+            GENERATION_STATE_TEXTS,
+        )
+    except Exception:
+        return {"evaluate_error": True, "signature": None}
+
+
+def detect_generation_state_legacy(page: Page, *, include_form_states: bool = True):
+    for selector in download_button_selectors():
+        download_button = first_visible_locator(page, selector)
+        if download_button is not None:
+            return "download", download_button
+
+    retry_button = first_visible_locator(page, SELECTORS["retry_button"])
+    if retry_button is not None or first_visible_locator(page, SELECTORS["streaming_error_text"]) is not None:
+        return "error", retry_button
+
+    if include_form_states:
+        new_analysis_button = first_visible_locator(page, SELECTORS["new_analysis_button"])
+        if new_analysis_button is not None:
+            return "analysis_stopped", new_analysis_button
+        generate_button = first_visible_locator(page, SELECTORS["generate_button"])
+        if generate_button is not None:
+            return "returned_to_form", generate_button
+
+    return None
+
+
 def wait_for_download_button(page: Page, timeout_ms: int = TIMEOUT_MS):
     deadline = datetime.now().timestamp() + timeout_ms / 1000
     candidates = download_button_selectors()
+    loop_count = 0
 
     while datetime.now().timestamp() < deadline:
-        for selector in candidates:
-            candidate = first_visible_locator(page, selector)
-            if candidate is not None:
-                return candidate
+        loop_count += 1
+        state = detect_generation_state(page)
+        if state.get("download"):
+            for selector in candidates:
+                candidate = first_visible_locator(page, selector)
+                if candidate is not None:
+                    return candidate
+        if state.get("evaluate_error") or loop_count % GENERATION_STATE_LEGACY_CHECK_INTERVAL_LOOPS == 0:
+            legacy = detect_generation_state_legacy(page, include_form_states=False)
+            if legacy is not None and legacy[0] == "download":
+                return legacy[1]
         page.wait_for_timeout(500)
 
     raise PlaywrightTimeoutError(f"다운로드 버튼이 {timeout_ms // 1000}초 안에 나타나지 않았습니다.")
@@ -705,6 +808,15 @@ def page_text_signature(page: Page) -> str | None:
         return None
 
 
+def wait_generation_poll_interval(page: Page, force_stop_requested: StopFlag | None = None) -> None:
+    remaining_ms = GENERATION_STATUS_POLL_INTERVAL_MS
+    while remaining_ms > 0:
+        check_force_stop(force_stop_requested)
+        step_ms = min(1_000, remaining_ms)
+        page.wait_for_timeout(step_ms)
+        remaining_ms -= step_ms
+
+
 def wait_for_download_or_generation_error(
     page: Page,
     timeout_ms: int = TIMEOUT_MS,
@@ -715,6 +827,7 @@ def wait_for_download_or_generation_error(
     started_at = datetime.now().timestamp()
     last_status_at = 0.0
     download_selectors = download_button_selectors()
+    loop_count = 0
 
     # 생성 스트리밍 POST가 끊기면(net::ERR_ABORTED 등) 화면만 봐서는 알 수 없으므로
     # 페이지 상시 레코더에서 이번 생성(클릭 직후 포함, 2초 여유) 이후의 실패만 본다.
@@ -728,36 +841,78 @@ def wait_for_download_or_generation_error(
     stall_signature: str | None = None
     stall_changed_at = started_at
 
+    def resolve_detected_state(state: dict[str, Any], *, include_form_states: bool):
+        if state.get("download"):
+            for selector in download_selectors:
+                download_button = first_visible_locator(page, selector)
+                if download_button is not None:
+                    if status_callback:
+                        status_callback("PDF 저장 버튼이 나타났습니다. 다운로드를 시작합니다.")
+                    return "download", download_button
+            return None
+
+        if state.get("retry") or state.get("streaming_error"):
+            retry_button = first_visible_locator(page, SELECTORS["retry_button"]) if state.get("retry") else None
+            if retry_button is not None or state.get("streaming_error"):
+                if status_callback:
+                    status_callback("KOTRA 서버 오류 화면이 감지되었습니다.")
+                return "error", retry_button
+            return None
+
+        if include_form_states and state.get("new_analysis"):
+            new_analysis_button = first_visible_locator(page, SELECTORS["new_analysis_button"])
+            if new_analysis_button is not None:
+                if status_callback:
+                    status_callback("분석이 중단되어 새로운 분석 시작 상태가 감지되었습니다.")
+                return "analysis_stopped", new_analysis_button
+            return None
+
+        if include_form_states and state.get("generate"):
+            generate_button = first_visible_locator(page, SELECTORS["generate_button"])
+            if generate_button is not None:
+                if status_callback:
+                    status_callback("초기 입력 화면으로 돌아온 상태가 감지되었습니다.")
+                return "returned_to_form", generate_button
+            return None
+
+        return None
+
+    def resolve_legacy_state(include_form_states: bool):
+        legacy = detect_generation_state_legacy(page, include_form_states=include_form_states)
+        if legacy is None:
+            return None
+        state, payload = legacy
+        if state == "download" and status_callback:
+            status_callback("PDF 저장 버튼이 나타났습니다. 다운로드를 시작합니다.")
+        elif state == "error" and status_callback:
+            status_callback("KOTRA 서버 오류 화면이 감지되었습니다.")
+        elif state == "analysis_stopped" and status_callback:
+            status_callback("분석이 중단되어 새로운 분석 시작 상태가 감지되었습니다.")
+        elif state == "returned_to_form" and status_callback:
+            status_callback("초기 입력 화면으로 돌아온 상태가 감지되었습니다.")
+        return state, payload
+
     while datetime.now().timestamp() < deadline:
         check_force_stop(force_stop_requested)
+        loop_count += 1
         now = datetime.now().timestamp()
         if status_callback and now - last_status_at >= 10:
             elapsed = int(now - started_at)
             status_callback(f"보고서 생성 중입니다. 경과 {elapsed}초")
             last_status_at = now
 
-        for selector in download_selectors:
-            download_button = first_visible_locator(page, selector)
-            if download_button is not None:
-                if status_callback:
-                    status_callback("PDF 저장 버튼이 나타났습니다. 다운로드를 시작합니다.")
-                return "download", download_button
-        retry_button = first_visible_locator(page, SELECTORS["retry_button"])
-        if retry_button is not None or first_visible_locator(page, SELECTORS["streaming_error_text"]) is not None:
-            if status_callback:
-                status_callback("KOTRA 서버 오류 화면이 감지되었습니다.")
-            return "error", retry_button
-        if now - started_at > 5:
-            new_analysis_button = first_visible_locator(page, SELECTORS["new_analysis_button"])
-            if new_analysis_button is not None:
-                if status_callback:
-                    status_callback("분석이 중단되어 새로운 분석 시작 상태가 감지되었습니다.")
-                return "analysis_stopped", new_analysis_button
-            generate_button = first_visible_locator(page, SELECTORS["generate_button"])
-            if generate_button is not None:
-                if status_callback:
-                    status_callback("초기 입력 화면으로 돌아온 상태가 감지되었습니다.")
-                return "returned_to_form", generate_button
+        include_form_states = now - started_at > 5
+        state = detect_generation_state(page)
+        resolved_state = resolve_detected_state(state, include_form_states=include_form_states)
+        if resolved_state is not None:
+            return resolved_state
+        if (
+            state.get("evaluate_error")
+            or loop_count % GENERATION_STATE_LEGACY_CHECK_INTERVAL_LOOPS == 0
+        ):
+            resolved_state = resolve_legacy_state(include_form_states=include_form_states)
+            if resolved_state is not None:
+                return resolved_state
 
         stream_failures = recent_stream_failures()
         if stream_failures and stream_failed_at is None:
@@ -770,14 +925,17 @@ def wait_for_download_or_generation_error(
         if stream_failed_at is not None and now - stream_failed_at >= GENERATION_ABORT_GRACE_SECONDS:
             return "generation_aborted", "; ".join(stream_failures[-3:])
 
-        signature = page_text_signature(page)
+        signature = state.get("signature") if not state.get("evaluate_error") else page_text_signature(page)
         if signature is None or signature != stall_signature:
             stall_signature = signature
             stall_changed_at = now
         elif now - stall_changed_at >= GENERATION_STALL_SECONDS:
+            resolved_state = resolve_legacy_state(include_form_states=True)
+            if resolved_state is not None:
+                return resolved_state
             return "stalled", None
 
-        page.wait_for_timeout(GENERATION_STATUS_POLL_INTERVAL_MS)
+        wait_generation_poll_interval(page, force_stop_requested)
 
     raise PlaywrightTimeoutError(f"다운로드 버튼이 {timeout_ms // 1000}초 안에 나타나지 않았습니다.")
 
@@ -2249,6 +2407,7 @@ def run_parallel_automation(
         emit_status(f"병렬 세션 중단으로 미처리 {len(uncompleted_numbers)}건을 실패로 기록했습니다.")
 
     emit_progress("완료")
+    flush_status_workbooks(log_dir)
     with counter_lock:
         result = {
             "total": total,
@@ -2259,6 +2418,7 @@ def run_parallel_automation(
         }
 
     if worker_errors and result["success"] + result["failed"] == 0:
+        flush_status_workbooks(log_dir)
         raise RuntimeError("모든 병렬 세션이 시작 또는 처리 중 실패했습니다: " + " / ".join(worker_errors))
 
     return result
@@ -2609,6 +2769,7 @@ def run_automation(
 
         finally:
             close_browser_context(context, browser)
+            flush_status_workbooks(log_dir)
 
     stopped = bool(stop_requested and stop_requested()) or bool(force_stop_requested and force_stop_requested())
     return {
@@ -2655,6 +2816,112 @@ def report_tasks_path(log_dir: str | Path) -> Path:
     return Path(log_dir) / REPORT_TASKS_FILENAME
 
 
+def _normalize_cache_path(path: str | Path) -> Path:
+    return Path(path).resolve()
+
+
+def _build_workbook_cache(
+    path: str | Path,
+    columns: list[str],
+    rows: list[dict[str, str]],
+    identity_func: Callable[[dict[str, Any]], tuple[str, ...]],
+) -> WorkbookStatusCache:
+    normalized_path = _normalize_cache_path(path)
+    rows_by_key = {identity_func(row): row for row in rows}
+    ordered_keys = [identity_func(row) for row in rows]
+    return WorkbookStatusCache(
+        path=normalized_path,
+        columns=columns,
+        rows_by_key=rows_by_key,
+        ordered_keys=ordered_keys,
+    )
+
+
+def _cache_rows(cache: WorkbookStatusCache) -> list[dict[str, str]]:
+    return [
+        cache.rows_by_key[key]
+        for key in cache.ordered_keys
+        if key in cache.rows_by_key
+    ]
+
+
+def _write_workbook_cache(cache: WorkbookStatusCache) -> None:
+    cache.path.parent.mkdir(parents=True, exist_ok=True)
+    rows = _cache_rows(cache)
+    df = pd.DataFrame(
+        [{column: row.get(column, "") for column in cache.columns} for row in rows],
+        columns=cache.columns,
+    )
+    df.to_excel(cache.path, index=False)
+    cache.dirty = False
+    cache.dirty_updates = 0
+    cache.last_flush_at = time.monotonic()
+
+
+def _mark_workbook_cache_dirty(cache: WorkbookStatusCache) -> None:
+    cache.dirty = True
+    cache.dirty_updates += 1
+
+
+def _flush_workbook_cache_if_due(cache: WorkbookStatusCache, *, force: bool = False) -> None:
+    if not cache.dirty:
+        return
+    elapsed = time.monotonic() - cache.last_flush_at
+    if (
+        force
+        or cache.dirty_updates >= STATUS_WORKBOOK_FLUSH_UPDATE_COUNT
+        or elapsed >= STATUS_WORKBOOK_FLUSH_INTERVAL_SECONDS
+    ):
+        _write_workbook_cache(cache)
+
+
+def _load_processing_status_cache(path: str | Path) -> WorkbookStatusCache:
+    normalized_path = _normalize_cache_path(path)
+    cache = PROCESSING_STATUS_CACHES.get(normalized_path)
+    if cache is None:
+        cache = _build_workbook_cache(
+            normalized_path,
+            PROCESSING_STATUS_COLUMNS,
+            read_processing_status_rows(normalized_path),
+            row_identity,
+        )
+        PROCESSING_STATUS_CACHES[normalized_path] = cache
+    return cache
+
+
+def _load_report_task_cache(path: str | Path) -> WorkbookStatusCache:
+    normalized_path = _normalize_cache_path(path)
+    cache = REPORT_TASK_CACHES.get(normalized_path)
+    if cache is None:
+        cache = _build_workbook_cache(
+            normalized_path,
+            REPORT_TASK_COLUMNS,
+            read_report_task_rows(normalized_path),
+            report_task_identity,
+        )
+        REPORT_TASK_CACHES[normalized_path] = cache
+    return cache
+
+
+def flush_processing_status(log_dir: str | Path) -> None:
+    with PROCESSING_STATUS_LOCK:
+        cache = PROCESSING_STATUS_CACHES.get(_normalize_cache_path(processing_status_path(log_dir)))
+        if cache is not None:
+            _flush_workbook_cache_if_due(cache, force=True)
+
+
+def flush_report_tasks(log_dir: str | Path) -> None:
+    with REPORT_TASKS_LOCK:
+        cache = REPORT_TASK_CACHES.get(_normalize_cache_path(report_tasks_path(log_dir)))
+        if cache is not None:
+            _flush_workbook_cache_if_due(cache, force=True)
+
+
+def flush_status_workbooks(log_dir: str | Path) -> None:
+    flush_processing_status(log_dir)
+    flush_report_tasks(log_dir)
+
+
 def initialize_processing_status(input_excel_path: str | Path, log_dir: str | Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
@@ -2675,6 +2942,13 @@ def initialize_processing_status(input_excel_path: str | Path, log_dir: str | Pa
         row_data["error_message"] = ""
 
     write_processing_status_rows(status_path, status_rows)
+    with PROCESSING_STATUS_LOCK:
+        PROCESSING_STATUS_CACHES[_normalize_cache_path(status_path)] = _build_workbook_cache(
+            status_path,
+            PROCESSING_STATUS_COLUMNS,
+            status_rows,
+            row_identity,
+        )
 
 
 def update_processing_status(
@@ -2686,29 +2960,29 @@ def update_processing_status(
     saved_file: str | Path = "",
     error_message: str = "",
 ) -> None:
-    status_path = processing_status_path(log_dir)
-    existing_rows = read_processing_status_rows(status_path)
-    existing_by_key = {row_identity(row): row for row in existing_rows}
-    ordered_keys = [row_identity(row) for row in existing_rows]
-    next_status_row = build_processing_status_row(input_excel_path, row_data)
-    key = row_identity(next_status_row)
-    status_row = existing_by_key.get(key, next_status_row)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with PROCESSING_STATUS_LOCK:
+        status_path = processing_status_path(log_dir)
+        cache = _load_processing_status_cache(status_path)
+        next_status_row = build_processing_status_row(input_excel_path, row_data)
+        key = row_identity(next_status_row)
+        status_row = cache.rows_by_key.get(key, next_status_row)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    status_row.update(next_status_row)
-    status_row[STATUS_COLUMN] = status
-    status_row[STATUS_AT_COLUMN] = now
-    status_row[SAVED_FILE_COLUMN] = str(saved_file) if saved_file else str(row_data.get("saved_file", ""))
-    status_row[ERROR_COLUMN] = error_message
+        status_row.update(next_status_row)
+        status_row[STATUS_COLUMN] = status
+        status_row[STATUS_AT_COLUMN] = now
+        status_row[SAVED_FILE_COLUMN] = str(saved_file) if saved_file else str(row_data.get("saved_file", ""))
+        status_row[ERROR_COLUMN] = error_message
 
-    if key not in existing_by_key:
-        ordered_keys.append(key)
-    existing_by_key[key] = status_row
-    write_processing_status_rows(status_path, [existing_by_key[item_key] for item_key in ordered_keys if item_key in existing_by_key])
+        if key not in cache.rows_by_key:
+            cache.ordered_keys.append(key)
+        cache.rows_by_key[key] = status_row
+        _mark_workbook_cache_dirty(cache)
+        _flush_workbook_cache_if_due(cache)
 
-    row_data["process_status"] = status
-    row_data["saved_file"] = str(saved_file) if saved_file else ""
-    row_data["error_message"] = error_message
+        row_data["process_status"] = status
+        row_data["saved_file"] = str(saved_file) if saved_file else ""
+        row_data["error_message"] = error_message
 
 
 def build_processing_status_row(input_excel_path: str | Path, row_data: dict[str, Any]) -> dict[str, str]:
@@ -2736,6 +3010,10 @@ def build_processing_status_row(input_excel_path: str | Path, row_data: dict[str
 
 
 def read_processing_status_rows(path: Path) -> list[dict[str, str]]:
+    cached = PROCESSING_STATUS_CACHES.get(_normalize_cache_path(path))
+    if cached is not None:
+        return [row.copy() for row in _cache_rows(cached)]
+
     if not path.exists():
         return []
 
@@ -2767,12 +3045,10 @@ def update_report_task_status(
 ) -> None:
     with REPORT_TASKS_LOCK:
         path = report_tasks_path(log_dir)
-        existing_rows = read_report_task_rows(path)
-        existing_by_key = {report_task_identity(row): row for row in existing_rows}
-        ordered_keys = [report_task_identity(row) for row in existing_rows]
+        cache = _load_report_task_cache(path)
         task_row = build_report_task_row(row_data, task_type, country)
         key = report_task_identity(task_row)
-        current_row = existing_by_key.get(key, task_row)
+        current_row = cache.rows_by_key.get(key, task_row)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         current_row.update(task_row)
@@ -2788,10 +3064,11 @@ def update_report_task_status(
         current_row["error_message"] = error_message
         current_row["updated_at"] = now
 
-        if key not in existing_by_key:
-            ordered_keys.append(key)
-        existing_by_key[key] = current_row
-        write_report_task_rows(path, [existing_by_key[item_key] for item_key in ordered_keys if item_key in existing_by_key])
+        if key not in cache.rows_by_key:
+            cache.ordered_keys.append(key)
+        cache.rows_by_key[key] = current_row
+        _mark_workbook_cache_dirty(cache)
+        _flush_workbook_cache_if_due(cache)
 
 
 def completed_report_task(
@@ -2803,18 +3080,20 @@ def completed_report_task(
     if not truthy(row_data.get("use_task_resume", False)):
         return None
 
-    path = report_tasks_path(log_dir)
-    task_row = build_report_task_row(row_data, task_type, country)
-    key = report_task_identity(task_row)
-    for row in reversed(read_report_task_rows(path)):
-        if report_task_identity(row) != key:
-            continue
-        if str(row.get("status", "")) != STATUS_SUCCESS:
-            return None
-        saved_file = str(row.get("saved_file", "")).strip()
-        if not saved_file or not Path(saved_file).exists():
-            return None
-        return row
+    with REPORT_TASKS_LOCK:
+        path = report_tasks_path(log_dir)
+        cache = _load_report_task_cache(path)
+        task_row = build_report_task_row(row_data, task_type, country)
+        key = report_task_identity(task_row)
+        for row in reversed(_cache_rows(cache)):
+            if report_task_identity(row) != key:
+                continue
+            if str(row.get("status", "")) != STATUS_SUCCESS:
+                return None
+            saved_file = str(row.get("saved_file", "")).strip()
+            if not saved_file or not Path(saved_file).exists():
+                return None
+            return row
     return None
 
 
@@ -2856,6 +3135,10 @@ def report_task_identity(row: dict[str, Any]) -> tuple[str, ...]:
 
 
 def read_report_task_rows(path: Path) -> list[dict[str, str]]:
+    cached = REPORT_TASK_CACHES.get(_normalize_cache_path(path))
+    if cached is not None:
+        return [row.copy() for row in _cache_rows(cached)]
+
     if not path.exists():
         return []
 
