@@ -9,7 +9,7 @@ import tkinter.font as tkfont
 import sys
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 
@@ -24,6 +24,7 @@ from config import (
     BASE_DIR,
     DEFAULT_DIRECT_REPORT_COUNT,
     DEFAULT_DOWNLOAD_DIR,
+    DEFAULT_HEADLESS,
     DEFAULT_LOG_DIR,
     DEFAULT_PARALLEL_SESSIONS,
     DEFAULT_ROW_RETRY_COUNT,
@@ -96,6 +97,28 @@ _SCROLLBAR_CHECK_INTERVAL = 250  # 스크롤바 필요 여부 점검 주기(ms) 
 # 데이터가 좌측 정렬인 열(상품명). 헤더 글자도 같은 정렬로 맞춰야 어긋나 보이지 않음.
 # 대상국(3)은 HS코드처럼 헤더/데이터 모두 중앙 정렬이므로 포함하지 않는다.
 _TABLE_LEFT_ALIGNED_COLUMNS = {1}
+
+_TREE_COLUMNS = ("product", "hs", "country", "session", "status", "elapsed", "file")
+_TREE_COLUMN_HEADINGS = {
+    "#0": "#",
+    "product": "상품명",
+    "hs": "HS코드",
+    "country": "대상국",
+    "session": "세션",
+    "status": "상태",
+    "elapsed": "경과",
+    "file": "파일",
+}
+_TREE_COLUMN_WIDTHS = {
+    "#0": 44,
+    "product": 260,
+    "hs": 96,
+    "country": 120,
+    "session": 64,
+    "status": 126,
+    "elapsed": 82,
+    "file": 72,
+}
 
 DEFAULT_FILENAME_PATTERN = ""
 DEFAULT_FILENAME_PARTS: list[dict[str, str]] = []
@@ -308,7 +331,7 @@ class KotraReportAppV2(ctk.CTk):
         self.input_path = tk.StringVar(value=str(BASE_DIR / "input.xlsx"))
         self.download_dir = tk.StringVar(value=str(DEFAULT_DOWNLOAD_DIR))
         self.report_mode = tk.StringVar(value="direct")
-        self.background = tk.BooleanVar(value=False)
+        self.background = tk.BooleanVar(value=DEFAULT_HEADLESS)
         self.use_session = tk.BooleanVar(value=False)
         self.auto_retry = tk.BooleanVar(value=True)
         self.custom_filename = tk.BooleanVar(value=False)
@@ -339,9 +362,14 @@ class KotraReportAppV2(ctk.CTk):
         self._board_content: ctk.CTkFrame | None = None
         self._progress_body: ctk.CTkScrollableFrame | None = None
         self._progress_header: ctk.CTkFrame | None = None
+        self._progress_tree: ttk.Treeview | None = None
+        self._progress_tree_scrollbar: ttk.Scrollbar | None = None
         self._header_gutter = 0  # 스크롤바가 보일 때만 _SCROLLBAR_GUTTER 로 바뀜
         self._progress_empty_label: ctk.CTkLabel | None = None
         self._progress_row_widgets: dict[str, dict] = {}
+        self._tree_items_by_key: dict[str, str] = {}
+        self._tree_file_paths_by_key: dict[str, list[str]] = {}
+        self._row_data_by_key: dict[str, dict] = {}
         self._row_start_times: dict[str, float] = {}
         self._running_keys: set[str] = set()
         self._row_status_by_key: dict[str, str] = {}
@@ -1293,33 +1321,84 @@ class KotraReportAppV2(ctk.CTk):
 
     def _build_progress_tree(self, parent: ctk.CTkFrame) -> None:
         parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
 
-        header = ctk.CTkFrame(parent, fg_color=COLORS["surface_alt"], corner_radius=0, height=36)
-        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
-        header.grid_propagate(False)
-        self._progress_header = header  # _apply_table_column_layout 에서 헤더만 거터 처리
-        self._configure_table_cols(header)
-        for col, text in [
-            (0, "#"),
-            (1, "상품명"),
-            (2, "HS코드"),
-            (3, "대상국"),
-            (4, "세션"),
-            (5, "상태"),
-            (6, "경과"),
-            (7, "파일"),
-        ]:
-            self._build_table_header_cell(header, col, text)
+        tree_frame = ctk.CTkFrame(parent, fg_color=COLORS["surface_alt"], corner_radius=0)
+        tree_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
 
-        body = ctk.CTkScrollableFrame(
-            parent, fg_color=COLORS["surface_alt"], corner_radius=0, border_width=0,
+        self._configure_tree_style()
+        tree = ttk.Treeview(
+            tree_frame,
+            columns=_TREE_COLUMNS,
+            show="tree headings",
+            selectmode="browse",
+            height=11,
         )
-        body.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
-        body.grid_columnconfigure(0, weight=1)
-        self._progress_body = body
-        self._setup_progress_scroll_isolation(body)
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        for column, heading in _TREE_COLUMN_HEADINGS.items():
+            tree.heading(column, text=heading, anchor="center")
+            tree.column(
+                column,
+                width=_TREE_COLUMN_WIDTHS[column],
+                minwidth=max(36, int(_TREE_COLUMN_WIDTHS[column] * 0.55)),
+                stretch=(column == "product"),
+                anchor=("w" if column == "product" else "center"),
+            )
+
+        tree.tag_configure("pending", foreground=COLORS["muted"])
+        tree.tag_configure("running", foreground=COLORS["primary"])
+        tree.tag_configure("success", foreground=COLORS["success"])
+        tree.tag_configure("failed", foreground=COLORS["danger"])
+        tree.tag_configure("retry", foreground=COLORS["warning"])
+        tree.bind("<Double-1>", self._open_tree_item_file)
+        tree.bind("<Return>", self._open_tree_item_file)
+        tree.bind("<MouseWheel>", self._on_tree_mousewheel, add="+")
+        tree.bind("<Button-4>", self._on_tree_mousewheel, add="+")
+        tree.bind("<Button-5>", self._on_tree_mousewheel, add="+")
+
+        self._progress_tree = tree
+        self._progress_tree_scrollbar = scrollbar
         self._show_progress_empty_state()
+
+    def _configure_tree_style(self) -> None:
+        style = ttk.Style(self)
+        try:
+            style.theme_use("default")
+        except tk.TclError:
+            pass
+        style.configure(
+            "Treeview",
+            background=COLORS["surface"],
+            fieldbackground=COLORS["surface"],
+            foreground=COLORS["text"],
+            rowheight=30,
+            borderwidth=0,
+            relief="flat",
+            font=self._tk_font_tuple(12),
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=COLORS["surface_alt"],
+            foreground=COLORS["muted"],
+            relief="flat",
+            font=self._tk_font_tuple(12, "bold"),
+        )
+        style.map("Treeview", background=[("selected", COLORS["primary_soft"])], foreground=[("selected", COLORS["text"])])
+
+    def _tk_font_tuple(self, size: int, weight: str = "normal") -> tuple[str, int, str]:
+        if sys.platform.startswith("win"):
+            family = "Malgun Gothic"
+        elif sys.platform == "darwin":
+            family = "Apple SD Gothic Neo"
+        else:
+            family = "TkDefaultFont"
+        return (family, size, weight)
 
     def _progress_scroll_needed(self) -> bool:
         """진행 테이블 내용이 보이는 영역보다 커서 실제로 스크롤이 필요한지."""
@@ -1626,6 +1705,21 @@ class KotraReportAppV2(ctk.CTk):
         label.configure(text=f"● {status}", fg_color=fg, text_color=text)
 
     def _show_progress_empty_state(self) -> None:
+        if self._progress_tree is not None:
+            tree = self._progress_tree
+            for item in tree.get_children():
+                tree.delete(item)
+            empty_item = tree.insert(
+                "",
+                "end",
+                text="",
+                values=("아직 실행된 항목이 없습니다.", "", "", "", "", "", ""),
+                tags=("pending",),
+            )
+            self._tree_items_by_key = {"__empty__": empty_item}
+            self._tree_file_paths_by_key.clear()
+            return
+
         body = self._progress_body
         if body is None:
             return
@@ -1639,6 +1733,132 @@ class KotraReportAppV2(ctk.CTk):
             height=160,
         )
         self._progress_empty_label.pack(fill="x", expand=True, pady=34)
+
+    def _tree_status_tag(self, status: str, extra: str | None = None) -> tuple[str, ...]:
+        if status == "처리 중":
+            base = "running"
+        elif status == "처리완료":
+            base = "success"
+        elif status == "처리실패":
+            base = "failed"
+        elif status == "자동 재시도 대기":
+            base = "retry"
+        else:
+            base = "pending"
+        return (base, extra) if extra else (base,)
+
+    def _tree_file_label(self, saved_files: list[str] | None) -> str:
+        return "열기" if saved_files else "—"
+
+    def _tree_insert_parent_row(self, key: str, row: dict) -> None:
+        tree = self._progress_tree
+        if tree is None or key in self._tree_items_by_key:
+            return
+        row_index = int(row.get("row_index", 0))
+        item = tree.insert(
+            "",
+            "end",
+            text=str(row_index),
+            values=(
+                str(row.get("product_name", ""))[:50],
+                str(row.get("hs_code", "")),
+                str(row.get("target_country", ""))[:26] or "—",
+                "—",
+                "처리 안됨",
+                "—",
+                "—",
+            ),
+            tags=self._tree_status_tag("처리 안됨"),
+            open=False,
+        )
+        self._tree_items_by_key[key] = item
+
+    def _tree_insert_child_task(self, parent_key: str, child_key: str) -> None:
+        tree = self._progress_tree
+        parent_item = self._tree_items_by_key.get(parent_key)
+        if tree is None or parent_item is None or child_key in self._tree_items_by_key:
+            return
+        state = self._child_state_by_key.get(child_key, {})
+        status = str(state.get("status", "처리 안됨"))
+        item = tree.insert(
+            parent_item,
+            "end",
+            text="↳",
+            values=(
+                self._child_label_for_key(child_key),
+                "",
+                "",
+                "",
+                status,
+                str(state.get("elapsed_str") or "—"),
+                self._tree_file_label([str(p) for p in state.get("saved_files", [])]),
+            ),
+            tags=self._tree_status_tag(status),
+            open=False,
+        )
+        self._tree_items_by_key[child_key] = item
+        saved_files = [str(path) for path in state.get("saved_files", []) if str(path).strip()]
+        if saved_files:
+            self._tree_file_paths_by_key[child_key] = saved_files
+
+    def _tree_update_item(
+        self,
+        key: str,
+        status: str,
+        elapsed_str: str,
+        saved_files: list[str] | None = None,
+        session_text: str | None = None,
+    ) -> None:
+        tree = self._progress_tree
+        item = self._tree_items_by_key.get(key)
+        if tree is None or item is None:
+            return
+        values = list(tree.item(item, "values"))
+        while len(values) < len(_TREE_COLUMNS):
+            values.append("")
+        if session_text is not None:
+            values[3] = session_text
+        values[4] = status
+        values[5] = elapsed_str
+        values[6] = self._tree_file_label(saved_files or [])
+        tree.item(item, values=values, tags=self._tree_status_tag(status))
+        if saved_files:
+            self._tree_file_paths_by_key[key] = [path for path in saved_files if str(path).strip()]
+        else:
+            self._tree_file_paths_by_key.pop(key, None)
+
+    def _open_tree_item_file(self, event: tk.Event | None = None) -> str:
+        tree = self._progress_tree
+        if tree is None:
+            return "break"
+        item = tree.identify_row(event.y) if event is not None and hasattr(event, "y") else tree.focus()
+        if not item:
+            item = tree.focus()
+        key = next((item_key for item_key, item_id in self._tree_items_by_key.items() if item_id == item), "")
+        paths = [Path(path) for path in self._tree_file_paths_by_key.get(key, [])]
+        if not paths:
+            return "break"
+        target = paths[0] if len(paths) == 1 else paths[0].parent
+        self._open_path(target)
+        return "break"
+
+    def _on_tree_mousewheel(self, event: tk.Event) -> str:
+        tree = self._progress_tree
+        if tree is None:
+            return "break"
+        step = self._wheel_scroll_units(event)
+        if step == 0:
+            return "break"
+        try:
+            top, bottom = tree.yview()
+            can_scroll_tree = top > 0.001 if step < 0 else bottom < 0.999
+            if can_scroll_tree:
+                tree.yview_scroll(step, "units")
+            else:
+                self._scroll_page_canvas(step)
+        except tk.TclError:
+            pass
+        return "break"
 
     def _bind_progress_row_scroll(self, frame: ctk.CTkFrame) -> None:
         if getattr(self._progress_body, "_parent_canvas", None) is None:
@@ -1672,6 +1892,9 @@ class KotraReportAppV2(ctk.CTk):
         self._refresh_child_visibility(parent_key)
 
     def _refresh_child_visibility(self, parent_key: str) -> None:
+        if self._progress_tree is not None:
+            return
+
         parent_widgets = self._progress_row_widgets.get(parent_key)
         if parent_widgets is None:
             return
@@ -2504,6 +2727,9 @@ class KotraReportAppV2(ctk.CTk):
         self.failed_count.set("0")
         self._row_status_by_key.clear()
         self._progress_row_widgets.clear()
+        self._tree_items_by_key.clear()
+        self._tree_file_paths_by_key.clear()
+        self._row_data_by_key.clear()
         self._row_start_times.clear()
         self._running_keys.clear()
         self._child_keys_by_parent.clear()
@@ -2790,6 +3016,7 @@ class KotraReportAppV2(ctk.CTk):
         self._child_state_by_key.setdefault(
             child_key, {"status": status, "elapsed_str": "—", "saved_files": []}
         )
+        self._tree_insert_child_task(parent_key, child_key)
 
     def _elapsed_str(self, key: str, ts: float) -> str:
         if key not in self._row_start_times:
@@ -2801,6 +3028,28 @@ class KotraReportAppV2(ctk.CTk):
     def _tick_elapsed(self) -> None:
         now = datetime.now().timestamp()
         for key in list(self._running_keys):
+            if self._progress_tree is not None:
+                start = self._row_start_times.get(key)
+                if start is None:
+                    continue
+                elapsed = int(now - start)
+                m, s = divmod(elapsed, 60)
+                elapsed_str = f"{m}m {s:02d}s" if m else f"{s}s"
+                item = self._tree_items_by_key.get(key)
+                if item is not None:
+                    try:
+                        values = list(self._progress_tree.item(item, "values"))
+                        while len(values) < len(_TREE_COLUMNS):
+                            values.append("")
+                        values[5] = elapsed_str
+                        self._progress_tree.item(item, values=values)
+                    except Exception:
+                        pass
+                state = self._child_state_by_key.get(key)
+                if state is not None:
+                    state["elapsed_str"] = elapsed_str
+                continue
+
             widgets = self._progress_row_widgets.get(key)
             start = self._row_start_times.get(key)
             if widgets is None or start is None:
@@ -2815,6 +3064,39 @@ class KotraReportAppV2(ctk.CTk):
         self.after(1000, self._tick_elapsed)
 
     def _init_progress_table(self, payload: object) -> None:
+        if self._progress_tree is not None:
+            rows = payload if isinstance(payload, list) else []
+            self._cancel_table_build()
+            tree = self._progress_tree
+            for item in tree.get_children():
+                tree.delete(item)
+            self._progress_row_widgets.clear()
+            self._tree_items_by_key.clear()
+            self._tree_file_paths_by_key.clear()
+            self._row_data_by_key.clear()
+            self._row_start_times.clear()
+            self._running_keys.clear()
+            self._row_status_by_key.clear()
+            self._child_keys_by_parent.clear()
+            self._child_status_by_key.clear()
+            self._child_state_by_key.clear()
+            self._child_expanded_parents.clear()
+            self._deferred_row_payloads.clear()
+            self._deferred_task_payloads.clear()
+            if not rows:
+                self._show_progress_empty_state()
+                return
+
+            for row in rows:
+                row_index = int(row.get("row_index", 0))
+                key = str(row.get("ui_key", "") or f"row:{row_index}")
+                self._row_status_by_key[key] = "처리 안됨"
+                self._row_data_by_key[key] = dict(row)
+                self._tree_insert_parent_row(key, row)
+                self._init_queued_child_tasks(key, row)
+            self._update_summary_counts()
+            return
+
         body = self._progress_body
         if body is None:
             return
@@ -2921,6 +3203,25 @@ class KotraReportAppV2(ctk.CTk):
         session_id = int(data.get("session_id", 1))
         ts = float(data.get("ts", 0))
         key = str(data.get("ui_key", "") or f"row:{row_index}")
+        if self._progress_tree is not None:
+            if key not in self._tree_items_by_key and key in self._row_data_by_key:
+                self._tree_insert_parent_row(key, self._row_data_by_key[key])
+            if status == "처리 중":
+                self._running_keys.add(key)
+                self._row_start_times[key] = ts
+                elapsed_str = "0s"
+            else:
+                self._running_keys.discard(key)
+                elapsed_str = self._elapsed_str(key, ts)
+            self._row_status_by_key[key] = status
+            saved_files = data.get("saved_files", [])
+            if not isinstance(saved_files, list):
+                saved_files = []
+            session_text = f"S{session_id}" if session_id > 0 else "—"
+            self._tree_update_item(key, status, elapsed_str, [str(path) for path in saved_files], session_text)
+            self._update_summary_counts()
+            return
+
         widgets = self._progress_row_widgets.get(key)
         if widgets is None:
             # 행 위젯이 청크 빌드 대기 중이면 마지막 상태를 보관했다가 생성 직후 반영한다.
@@ -2972,6 +3273,31 @@ class KotraReportAppV2(ctk.CTk):
         ts: float,
         saved_files: list[str] | None = None,
     ) -> None:
+        if self._progress_tree is not None:
+            child_key = f"{parent_key}:{task_type}:{country}"
+            if status == "처리 중":
+                self._row_start_times[child_key] = ts
+                self._running_keys.add(child_key)
+                elapsed_str = "0s"
+            else:
+                self._running_keys.discard(child_key)
+                if status == "처리 안됨":
+                    self._row_start_times.pop(child_key, None)
+                    elapsed_str = "—"
+                else:
+                    elapsed_str = self._elapsed_str(child_key, ts)
+            if child_key not in self._child_keys_by_parent.setdefault(parent_key, []):
+                self._child_keys_by_parent[parent_key].append(child_key)
+            self._child_status_by_key[child_key] = status
+            self._child_state_by_key[child_key] = {
+                "status": status,
+                "elapsed_str": elapsed_str,
+                "saved_files": list(saved_files or []),
+            }
+            self._tree_insert_child_task(parent_key, child_key)
+            self._tree_update_item(child_key, status, elapsed_str, saved_files or [])
+            return
+
         parent_widgets = self._progress_row_widgets.get(parent_key)
         child_key = f"{parent_key}:{task_type}:{country}"
         if parent_widgets is None:

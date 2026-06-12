@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-dir", default=str(DEFAULT_DOWNLOAD_DIR), help="다운로드 저장 폴더")
     parser.add_argument("--log-dir", default=str(DEFAULT_LOG_DIR), help="로그 저장 폴더")
     parser.add_argument("--headless", action="store_true", help="브라우저를 백그라운드로 실행합니다.")
+    parser.add_argument("--no-headless", action="store_true", help="기본 백그라운드 실행을 끄고 브라우저 화면을 표시합니다.")
     parser.add_argument("--login-wait", action="store_true", help="브라우저에서 수동 작업 후 Enter를 누르고 시작합니다.")
     parser.add_argument("--no-login-wait", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--use-storage-state", action="store_true", help="state.json 브라우저 세션을 사용하고 실행 후 다시 저장합니다.")
@@ -109,7 +110,7 @@ def main() -> int:
     result = run_automation(
         input_excel_path=input_path,
         download_dir=args.download_dir,
-        headless=args.headless or bool(DEFAULT_CONFIG["headless"]),
+        headless=(False if args.no_headless else (args.headless or bool(DEFAULT_CONFIG["headless"]))),
         log_dir=args.log_dir,
         use_storage_state=use_storage_state,
         save_storage_state=use_storage_state,
