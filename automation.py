@@ -1819,6 +1819,9 @@ def truthy(value: Any) -> bool:
 
 # 대상국/제외국가 칸에 '-' 처럼 대시만 적은 값은 '희망 국가 없음' 의도의 플레이스홀더로 본다.
 COUNTRY_NONE_PLACEHOLDER_RE = re.compile(r"[-–—―－]+")
+COUNTRY_NAME_ALIASES = {
+    "uae": "아랍에미리트",
+}
 
 
 def split_country_values(value: Any) -> list[str]:
@@ -1843,6 +1846,9 @@ def normalize_single_country(value: Any) -> str:
     text = text.strip(" ,")
     if COUNTRY_NONE_PLACEHOLDER_RE.fullmatch(text):
         return ""
+    alias = COUNTRY_NAME_ALIASES.get(normalize_country_key(text))
+    if alias:
+        return alias
     return text
 
 
