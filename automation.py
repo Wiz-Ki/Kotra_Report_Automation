@@ -1430,6 +1430,9 @@ def process_direct_row(
     direct_report_files: list[Path] = []
     country_failures: list[tuple[str, Exception]] = []
     for index, country in enumerate(target_countries):
+        # 강제종료를 국가 단위로 가장 먼저 확인해야 reset_for_next_row(최대 60초 대기)에
+        # 진입하기 전에 멈출 수 있다.
+        check_force_stop(force_stop_requested)
         completed_task = completed_report_task(log_dir, row_data, TASK_TYPE_DIRECT, country)
         if completed_task is not None:
             saved_file = Path(str(completed_task.get("saved_file", "")))
@@ -1458,6 +1461,12 @@ def process_direct_row(
                 force_stop_requested,
                 filename_pattern,
             )
+        except AutomationAborted as exc:
+            # 강제종료는 RuntimeError 서브클래스라 아래 except에 잡히면 '국가별 실패'로
+            # 집계된 뒤 다음 국가로 넘어간다. 작업 상태만 기록하고 즉시 전파한다.
+            update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
+            emit_task_status(country, STATUS_FAILED)
+            raise
         except Exception as exc:
             if page_is_closed(page) or is_closed_browser_error(exc):
                 update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
@@ -1592,6 +1601,9 @@ def process_recommendation_row(
     direct_report_files: list[Path] = []
     country_failures: list[tuple[str, Exception]] = []
     for country in final_targets:
+        # 강제종료를 국가 단위로 가장 먼저 확인해야 reset_for_next_row(최대 60초 대기)에
+        # 진입하기 전에 멈출 수 있다.
+        check_force_stop(force_stop_requested)
         completed_direct_task = completed_report_task(log_dir, row_data, TASK_TYPE_DIRECT, country)
         if completed_direct_task is not None:
             saved_file = Path(str(completed_direct_task.get("saved_file", "")))
@@ -1619,6 +1631,12 @@ def process_recommendation_row(
                 force_stop_requested,
                 filename_pattern,
             )
+        except AutomationAborted as exc:
+            # 강제종료는 RuntimeError 서브클래스라 아래 except에 잡히면 '국가별 실패'로
+            # 집계된 뒤 다음 국가로 넘어간다. 작업 상태만 기록하고 즉시 전파한다.
+            update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
+            emit_task_status(TASK_TYPE_DIRECT, country, STATUS_FAILED)
+            raise
         except Exception as exc:
             if page_is_closed(page) or is_closed_browser_error(exc):
                 update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
@@ -1741,6 +1759,10 @@ def submit_and_download_report(
                 row_data=row_data,
                 filename_pattern=filename_pattern,
             )
+        except AutomationAborted:
+            # 강제종료는 RuntimeError 서브클래스다. 아래 핸들러에 잡히면 메시지 내용에
+            # 따라 GenerationError로 둔갑해 타입이 소실되므로 먼저 전파한다.
+            raise
         except RuntimeError as exc:
             last_error = exc
             message = str(exc)
